@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 var version string
+
+// validName matches a name every provider accepts (Multipass, AWS, GCP): starts
+// with a lowercase letter, ends with a lowercase letter or digit, only lowercase
+// letters, digits, and hyphens in between, at most 63 characters.
+var validName = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func getVersion() string {
 	if version == "" {
@@ -46,14 +52,17 @@ func newRootCommand() *cobra.Command {
 func newCreateCommand() *cobra.Command {
 	var provider string
 	var numNodes int
+	var environmentName string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a new homelab environment",
 		Long:  "Create a new homelab environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if numNodes < 1 || numNodes > 15 {
-				return fmt.Errorf("invalid number of nodes: %d: must be greater than 0 and no greater than 15", numNodes)
+			if err := validateCreateInputs(provider, numNodes, environmentName); err != nil {
+				return err
 			}
+
+			fmt.Fprint(cmd.OutOrStdout(), createHeader(provider, numNodes, environmentName))
 
 			switch provider {
 			case "aws":
@@ -62,16 +71,15 @@ func newCreateCommand() *cobra.Command {
 				if err := checkMultipass(); err != nil {
 					return err
 				}
-			default:
-				return fmt.Errorf("invalid provider: %s: must be aws, gcp, or local", provider)
+				launchArgs := strings.Join(buildMultipassLaunchArgs(environmentName), " ")
+				fmt.Fprintf(cmd.OutOrStdout(), "multipass %s\n", launchArgs)
 			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Creating a new homelab environment...\nProvider: %s\nNodes: %d\n", provider, numNodes)
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&provider, "provider", "p", "local", "The provider to use for the homelab environment (aws, gcp, local)")
 	cmd.Flags().IntVarP(&numNodes, "nodes", "n", 1, "The number of nodes to create for the homelab environment")
+	cmd.Flags().StringVar(&environmentName, "name", "homelab", "The name of the lab environment")
 	return cmd
 }
 
@@ -85,6 +93,38 @@ func checkMultipass() error {
 		return fmt.Errorf("command 'multipass list' failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func buildMultipassLaunchArgs(name string) []string {
+	return []string{
+		"launch",
+		"24.04",
+		"--name",
+		name,
+		"--cpus",
+		"2",
+		"--memory",
+		"4G",
+		"--disk",
+		"30G",
+	}
+}
+
+func validateCreateInputs(provider string, nodes int, name string) error {
+	if provider != "local" && provider != "aws" && provider != "gcp" {
+		return fmt.Errorf("invalid provider: %s: must be aws, gcp, or local", provider)
+	}
+	if nodes < 1 || nodes > 15 {
+		return fmt.Errorf("invalid number of nodes: %d: must be greater than 0 and no greater than 15", nodes)
+	}
+	if !validName.MatchString(name) {
+		return fmt.Errorf("invalid name: %q: must start with a lowercase letter, end with a lowercase letter or digit, contain only lowercase letters, digits, or hyphens, and be at most 63 characters", name)
+	}
+	return nil
+}
+
+func createHeader(provider string, nodes int, name string) string {
+	return fmt.Sprintf("Creating a new homelab environment: %s\nProvider: %s\nNodes: %d\n", name, provider, nodes)
 }
 
 func main() {
