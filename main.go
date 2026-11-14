@@ -1,13 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
-
-	"github.com/spf13/cobra"
 )
 
 var version string
@@ -68,9 +69,18 @@ func newCreateCommand() *cobra.Command {
 			case "aws":
 			case "gcp":
 			case "local":
-				if err := checkMultipass(); err != nil {
+				output, err := checkMultipass()
+				if err != nil {
 					return err
 				}
+				exists, err := instanceExists(output, environmentName)
+				if err != nil {
+					return err
+				}
+				if exists {
+					return fmt.Errorf("homelab instance %q already exists: choose a different name with --name", environmentName)
+				}
+
 				launchArgs := strings.Join(buildMultipassLaunchArgs(environmentName), " ")
 				fmt.Fprintf(cmd.OutOrStdout(), "multipass %s\n", launchArgs)
 			}
@@ -83,16 +93,20 @@ func newCreateCommand() *cobra.Command {
 	return cmd
 }
 
-func checkMultipass() error {
+func checkMultipass() ([]byte, error) {
 	_, err := exec.LookPath("multipass")
 	if err != nil {
-		return fmt.Errorf("multipass not found: %w: install it from https://multipass.run/install", err)
+		return nil, fmt.Errorf("multipass not found: %w: install it from https://multipass.run/install", err)
 	}
-	output, err := exec.Command("multipass", "list").CombinedOutput()
+	output, err := exec.Command("multipass", "list", "--format", "json").Output()
 	if err != nil {
-		return fmt.Errorf("command 'multipass list' failed: %w: %s", err, strings.TrimSpace(string(output)))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("command 'multipass list' failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, fmt.Errorf("command 'multipass list' failed: %w", err)
 	}
-	return nil
+	return output, nil
 }
 
 func buildMultipassLaunchArgs(name string) []string {
@@ -125,6 +139,27 @@ func validateCreateInputs(provider string, nodes int, name string) error {
 
 func createHeader(provider string, nodes int, name string) string {
 	return fmt.Sprintf("Creating a new homelab environment: %s\nProvider: %s\nNodes: %d\n", name, provider, nodes)
+}
+
+func instanceExists(data []byte, name string) (bool, error) {
+	var list MultipassList
+	if err := json.Unmarshal(data, &list); err != nil {
+		return false, fmt.Errorf("parsing multipass list output: %w", err)
+	}
+	for _, instance := range list.Instances {
+		if instance.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type MultipassList struct {
+	Instances []MultipassInstance `json:"list"`
+}
+
+type MultipassInstance struct {
+	Name string `json:"name"`
 }
 
 func main() {

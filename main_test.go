@@ -194,3 +194,31 @@ func TestCreateHeader(t *testing.T) {
 		t.Errorf("Expected header: %q, got: %q", want, got)
 	}
 }
+
+func TestInstanceExists(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		lookup  string
+		want    bool
+		wantErr bool
+	}{
+		{"empty list", `{"list": []}`, "homelab", false, false},
+		{"match", `{"list": [{"name": "homelab", "state": "Running"}]}`, "homelab", true, false},
+		{"no match", `{"list": [{"name": "other"}]}`, "homelab", false, false},
+		{"match among several", `{"list": [{"name": "a"}, {"name": "homelab"}]}`, "homelab", true, false},
+		{"prefix is not a match", `{"list": [{"name": "homelab-2"}]}`, "homelab", false, false},
+		{"invalid json", `not json`, "homelab", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := instanceExists([]byte(tt.data), tt.lookup)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("instanceExists() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("instanceExists() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
