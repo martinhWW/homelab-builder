@@ -33,37 +33,11 @@ func TestUnknownCommand(t *testing.T) {
 	}
 }
 
-// stubLaunch replaces launch with a fake that records its args and returns err,
-// so tests never start a real VM. The original is restored when the test ends.
-func stubLaunch(t *testing.T, err error) *[]string {
-	t.Helper()
-	var gotArgs []string
-	orig := launch
-	launch = func(w io.Writer, args []string) error {
-		gotArgs = args
-		return err
-	}
-	t.Cleanup(func() { launch = orig })
-	return &gotArgs
-}
-
-// stubVerify replaces verify with a fake that records the instance name and
-// returns err, so tests never run `multipass exec`. Restored when the test ends.
-func stubVerify(t *testing.T, err error) *string {
-	t.Helper()
-	var gotName string
-	orig := verify
-	verify = func(name string) error {
-		gotName = name
-		return err
-	}
-	t.Cleanup(func() { verify = orig })
-	return &gotName
-}
-
 func TestCreate(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
 	gotName := stubVerify(t, nil)
+	gotCheckName := stubVerifyK3s(t, false, nil)
+	gotInstallName, _ := stubInstallK3s(t, nil)
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -74,7 +48,14 @@ func TestCreate(t *testing.T) {
 	}
 	want := "Creating a new homelab environment: homelab\nProvider: local\nNodes: 1\n" +
 		"multipass launch 24.04 --name homelab --cpus 2 --memory 4G --disk 30G\n" +
-		"vm \"homelab\" is ready\n"
+		"vm \"homelab\" is ready\n" +
+		"k3s has been installed on VM \"homelab\"\n"
+	if *gotCheckName != "homelab" {
+		t.Errorf("verifyK3s called with %q, want %q", *gotCheckName, "homelab")
+	}
+	if *gotInstallName != "homelab" {
+		t.Errorf("installK3s called with %q, want %q", *gotInstallName, "homelab")
+	}
 	if buf.String() != want {
 		t.Errorf("Expected output: %q, got: %q", want, buf.String())
 	}
@@ -116,6 +97,8 @@ func TestCreateLaunchFails(t *testing.T) {
 func TestCreateWithName(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
 	gotName := stubVerify(t, nil)
+	stubVerifyK3s(t, false, nil)
+	gotInstallName, _ := stubInstallK3s(t, nil)
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -133,6 +116,64 @@ func TestCreateWithName(t *testing.T) {
 	}
 	if *gotName != "mylab" {
 		t.Errorf("verify called with %q, want %q", *gotName, "mylab")
+	}
+	if *gotInstallName != "mylab" {
+		t.Errorf("installK3s called with %q, want %q", *gotInstallName, "mylab")
+	}
+}
+
+func TestCreateK3sAlreadyInstalled(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, true, nil)
+	_, called := stubInstallK3s(t, nil)
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Error executing command: %v", err)
+	}
+	if *called {
+		t.Error("installK3s was called, but k3s was already installed")
+	}
+	if !strings.Contains(buf.String(), "k3s is already installed on VM \"k3slab\"") {
+		t.Errorf("Expected already-installed message, got: %q", buf.String())
+	}
+}
+
+func TestCreateK3sCheckFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, false, errors.New("check broke"))
+	_, called := stubInstallK3s(t, nil)
+	rootCmd := newRootCommand()
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "check broke") {
+		t.Fatalf("Expected verifyK3s error to be returned, got: %v", err)
+	}
+	if *called {
+		t.Error("installK3s was called after the k3s check failed")
+	}
+}
+
+func TestCreateK3sInstallFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, false, nil)
+	stubInstallK3s(t, errors.New("install broke"))
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "install broke") {
+		t.Fatalf("Expected installK3s error to be returned, got: %v", err)
+	}
+	if strings.Contains(buf.String(), "has been installed") {
+		t.Errorf("Expected no success message when install fails, got: %q", buf.String())
 	}
 }
 
@@ -214,20 +255,6 @@ func TestValidateCreateInputsProvider(t *testing.T) {
 	}
 }
 
-func TestBuildMultipassLaunchArgs(t *testing.T) {
-	got := buildMultipassLaunchArgs("homelab-node-1")
-	want := []string{
-		"launch", "24.04",
-		"--name", "homelab-node-1",
-		"--cpus", "2",
-		"--memory", "4G",
-		"--disk", "30G",
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("Expected args: %q, got: %q", want, got)
-	}
-}
-
 func TestValidateCreateInputsName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -266,33 +293,5 @@ func TestCreateHeader(t *testing.T) {
 	want := "Creating a new homelab environment: mylab\nProvider: aws\nNodes: 3\n"
 	if got != want {
 		t.Errorf("Expected header: %q, got: %q", want, got)
-	}
-}
-
-func TestInstanceExists(t *testing.T) {
-	tests := []struct {
-		name    string
-		data    string
-		lookup  string
-		want    bool
-		wantErr bool
-	}{
-		{"empty list", `{"list": []}`, "homelab", false, false},
-		{"match", `{"list": [{"name": "homelab", "state": "Running"}]}`, "homelab", true, false},
-		{"no match", `{"list": [{"name": "other"}]}`, "homelab", false, false},
-		{"match among several", `{"list": [{"name": "a"}, {"name": "homelab"}]}`, "homelab", true, false},
-		{"prefix is not a match", `{"list": [{"name": "homelab-2"}]}`, "homelab", false, false},
-		{"invalid json", `not json`, "homelab", false, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := instanceExists([]byte(tt.data), tt.lookup)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("instanceExists() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Errorf("instanceExists() = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }
