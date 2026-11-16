@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -31,7 +33,22 @@ func TestUnknownCommand(t *testing.T) {
 	}
 }
 
+// stubLaunch replaces launch with a fake that records its args and returns err,
+// so tests never start a real VM. The original is restored when the test ends.
+func stubLaunch(t *testing.T, err error) *[]string {
+	t.Helper()
+	var gotArgs []string
+	orig := launch
+	launch = func(w io.Writer, args []string) error {
+		gotArgs = args
+		return err
+	}
+	t.Cleanup(func() { launch = orig })
+	return &gotArgs
+}
+
 func TestCreate(t *testing.T) {
+	gotArgs := stubLaunch(t, nil)
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -45,9 +62,24 @@ func TestCreate(t *testing.T) {
 	if buf.String() != want {
 		t.Errorf("Expected output: %q, got: %q", want, buf.String())
 	}
+	if !slices.Equal(*gotArgs, buildMultipassLaunchArgs("homelab")) {
+		t.Errorf("launch called with %v, want %v", *gotArgs, buildMultipassLaunchArgs("homelab"))
+	}
+}
+
+func TestCreateLaunchFails(t *testing.T) {
+	stubLaunch(t, errors.New("boom"))
+	rootCmd := newRootCommand()
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetArgs([]string{"create", "--name", "faillab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Expected launch error to be returned, got: %v", err)
+	}
 }
 
 func TestCreateWithName(t *testing.T) {
+	gotArgs := stubLaunch(t, nil)
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -59,6 +91,9 @@ func TestCreateWithName(t *testing.T) {
 	want := "multipass launch 24.04 --name mylab --cpus 2 --memory 4G --disk 30G\n"
 	if !strings.Contains(buf.String(), want) {
 		t.Errorf("Expected output to contain %q, got: %q", want, buf.String())
+	}
+	if !slices.Equal(*gotArgs, buildMultipassLaunchArgs("mylab")) {
+		t.Errorf("launch called with %v, want %v", *gotArgs, buildMultipassLaunchArgs("mylab"))
 	}
 }
 

@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/spf13/cobra"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 var version string
+var launch = launchInstance
 
 // validName matches a name every provider accepts (Multipass, AWS, GCP): starts
 // with a lowercase letter, ends with a lowercase letter or digit, only lowercase
@@ -81,8 +84,12 @@ func newCreateCommand() *cobra.Command {
 					return fmt.Errorf("homelab instance %q already exists: choose a different name with --name", environmentName)
 				}
 
-				launchArgs := strings.Join(buildMultipassLaunchArgs(environmentName), " ")
-				fmt.Fprintf(cmd.OutOrStdout(), "multipass %s\n", launchArgs)
+				launchArgs := buildMultipassLaunchArgs(environmentName)
+				fmt.Fprintf(cmd.OutOrStdout(), "multipass %s\n", strings.Join(launchArgs, " "))
+				err = launch(cmd.OutOrStdout(), launchArgs)
+				if err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -107,6 +114,16 @@ func checkMultipass() ([]byte, error) {
 		return nil, fmt.Errorf("command 'multipass list' failed: %w", err)
 	}
 	return output, nil
+}
+
+func launchInstance(w io.Writer, args []string) error {
+	c := exec.Command("multipass", args...)
+	c.Stdout = w
+	c.Stderr = w
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("multipass launch failed: %w", err)
+	}
+	return nil
 }
 
 func buildMultipassLaunchArgs(name string) []string {
