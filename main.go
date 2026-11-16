@@ -15,6 +15,7 @@ import (
 
 var version string
 var launch = launchInstance
+var verify = verifyInstance
 
 // validName matches a name every provider accepts (Multipass, AWS, GCP): starts
 // with a lowercase letter, ends with a lowercase letter or digit, only lowercase
@@ -90,6 +91,11 @@ func newCreateCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				err = verify(environmentName)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "vm %q is ready\n", environmentName)
 			}
 			return nil
 		},
@@ -122,6 +128,18 @@ func launchInstance(w io.Writer, args []string) error {
 	c.Stderr = w
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("multipass launch failed: %w", err)
+	}
+	return nil
+}
+
+func verifyInstance(name string) error {
+	_, err := exec.Command("multipass", "exec", name, "--", "true").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("connection to VM %q failed: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return fmt.Errorf("connection to VM %q failed: %w", name, err)
 	}
 	return nil
 }

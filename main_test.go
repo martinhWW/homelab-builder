@@ -47,8 +47,23 @@ func stubLaunch(t *testing.T, err error) *[]string {
 	return &gotArgs
 }
 
+// stubVerify replaces verify with a fake that records the instance name and
+// returns err, so tests never run `multipass exec`. Restored when the test ends.
+func stubVerify(t *testing.T, err error) *string {
+	t.Helper()
+	var gotName string
+	orig := verify
+	verify = func(name string) error {
+		gotName = name
+		return err
+	}
+	t.Cleanup(func() { verify = orig })
+	return &gotName
+}
+
 func TestCreate(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
+	gotName := stubVerify(t, nil)
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -58,12 +73,32 @@ func TestCreate(t *testing.T) {
 		t.Fatalf("Error executing command: %v", err)
 	}
 	want := "Creating a new homelab environment: homelab\nProvider: local\nNodes: 1\n" +
-		"multipass launch 24.04 --name homelab --cpus 2 --memory 4G --disk 30G\n"
+		"multipass launch 24.04 --name homelab --cpus 2 --memory 4G --disk 30G\n" +
+		"vm \"homelab\" is ready\n"
 	if buf.String() != want {
 		t.Errorf("Expected output: %q, got: %q", want, buf.String())
 	}
 	if !slices.Equal(*gotArgs, buildMultipassLaunchArgs("homelab")) {
 		t.Errorf("launch called with %v, want %v", *gotArgs, buildMultipassLaunchArgs("homelab"))
+	}
+	if *gotName != "homelab" {
+		t.Errorf("verify called with %q, want %q", *gotName, "homelab")
+	}
+}
+
+func TestCreateVerifyFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, errors.New("not reachable"))
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "faillab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not reachable") {
+		t.Fatalf("Expected verify error to be returned, got: %v", err)
+	}
+	if strings.Contains(buf.String(), "is ready") {
+		t.Errorf("Expected no ready message when verify fails, got: %q", buf.String())
 	}
 }
 
@@ -80,6 +115,7 @@ func TestCreateLaunchFails(t *testing.T) {
 
 func TestCreateWithName(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
+	gotName := stubVerify(t, nil)
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -94,6 +130,9 @@ func TestCreateWithName(t *testing.T) {
 	}
 	if !slices.Equal(*gotArgs, buildMultipassLaunchArgs("mylab")) {
 		t.Errorf("launch called with %v, want %v", *gotArgs, buildMultipassLaunchArgs("mylab"))
+	}
+	if *gotName != "mylab" {
+		t.Errorf("verify called with %q, want %q", *gotName, "mylab")
 	}
 }
 
