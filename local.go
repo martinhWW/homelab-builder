@@ -1,18 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 var launch = launchInstance
 var verify = verifyInstance
 var verifyK3s = verifyK3sExists
 var installK3s = installK3sOnVm
+var getVmInfo = vmInfo
+var getKubeconfig = fetchKubeconfig
+var waitForNodeReadyCheck = waitForNodeReady
 
 func createLocal(w io.Writer, name string) error {
 	// Check if Multipass is installed on the host machine
@@ -49,13 +54,41 @@ func createLocal(w io.Writer, name string) error {
 	}
 	if installed {
 		fmt.Fprintf(w, "k3s is already installed on VM %q\n", name)
-		return nil
+	} else {
+		err = installK3s(w, name)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "k3s has been installed on VM %q\n", name)
 	}
-	err = installK3s(w, name)
+
+	info, err := getVmInfo(name)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "k3s has been installed on VM %q\n", name)
+	ipString, err := parseVMIP(info, name)
+	if err != nil {
+		return err
+	}
+	kubeconfig, err := getKubeconfig(name)
+	if err != nil {
+		return err
+	}
+	editedKubeconfig := setKubeconfigServer(kubeconfig, ipString)
+	dir, err := environmentDir(name)
+	if err != nil {
+		return err
+	}
+	pathToKubeconfig, err := saveKubeconfig(dir, editedKubeconfig)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "waiting for node to be ready...")
+	err = waitForNodeReadyCheck(name)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "connect to k3s cluster using kubeconfig: export KUBECONFIG=%q\n", pathToKubeconfig)
 
 	return nil
 }
@@ -115,7 +148,7 @@ func buildMultipassLaunchArgs(name string) []string {
 
 func installK3sOnVm(w io.Writer, name string) error {
 	downloadCmd := `curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh`
-	installCmd := `INSTALL_K3S_EXEC="server --disable traefik --write-kubeconfig-mode 644" sh /tmp/k3s-install.sh`
+	installCmd := `INSTALL_K3S_EXEC="server --disable traefik" sh /tmp/k3s-install.sh`
 
 	// Pass "sh", "-c", and the full command string as separate arguments to multipass exec
 	cmd := exec.Command("multipass", "exec", name, "--", "sh", "-c", downloadCmd+" && "+installCmd)
@@ -154,6 +187,82 @@ func instanceExists(data []byte, name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func fetchKubeconfig(name string) ([]byte, error) {
+	output, err := exec.Command("multipass", "exec", name, "--", "sudo", "cat", "/etc/rancher/k3s/k3s.yaml").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("reading kubeconfig from VM %q: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, fmt.Errorf("reading kubeconfig from VM %q: %w", name, err)
+	}
+	return output, nil
+}
+
+func nodeReadyCheck(name string) error {
+	_, err := exec.Command("multipass", "exec", name, "--", "sudo", "k3s", "kubectl", "wait", "--for=condition=Ready", "node", "--all", "--timeout=10s").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("waiting for k3s node on VM %q to ready: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w", name, err)
+	}
+	return nil
+}
+
+func waitForNodeReady(name string) error {
+	attempts := 10
+	var err error
+	for i := 0; i < attempts; i++ {
+		err = nodeReadyCheck(name)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("node on VM %q not ready after %d attempts: %w", name, attempts, err)
+}
+
+func vmInfo(name string) ([]byte, error) {
+	output, err := exec.Command("multipass", "info", name, "--format", "json").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("command 'multipass info' failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, fmt.Errorf("command 'multipass info' failed: %w", err)
+	}
+	return output, nil
+}
+
+func parseVMIP(data []byte, name string) (string, error) {
+	var info MultipassInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return "", fmt.Errorf("parsing multipass info output: %w", err)
+	}
+	vm, ok := info.Info[name]
+	if !ok {
+		return "", fmt.Errorf("VM %q not found in multipass info output", name)
+	}
+	if len(vm.IPv4) == 0 {
+		return "", fmt.Errorf("VM %q has no IPv4 address", name)
+	}
+	return vm.IPv4[0], nil
+}
+
+func setKubeconfigServer(data []byte, ip string) []byte {
+	return bytes.ReplaceAll(data, []byte("127.0.0.1"), []byte(ip))
+}
+
+type MultipassInfo struct {
+	Info map[string]MultipassVMInfo `json:"info"`
+}
+
+type MultipassVMInfo struct {
+	IPv4 []string `json:"ipv4"`
 }
 
 type MultipassList struct {

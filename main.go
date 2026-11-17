@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/spf13/cobra"
@@ -92,6 +93,27 @@ func validateCreateInputs(provider string, nodes int, name string) error {
 
 func createHeader(provider string, nodes int, name string) string {
 	return fmt.Sprintf("Creating a new homelab environment: %s\nProvider: %s\nNodes: %d\n", name, provider, nodes)
+}
+
+func environmentDir(name string) (string, error) {
+	homepath, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding home directory: %w", err)
+	}
+	return filepath.Join(homepath, ".homelab", name), nil
+}
+
+func saveKubeconfig(dir string, data []byte) (string, error) {
+	err := os.MkdirAll(dir, 0700)
+	if err != nil {
+		return "", fmt.Errorf("creating environment directory: %w", err)
+	}
+	pathToFile := filepath.Join(dir, "kubeconfig")
+	err = os.WriteFile(pathToFile, data, 0600)
+	if err != nil {
+		return "", fmt.Errorf("writing kubeconfig: %w", err)
+	}
+	return pathToFile, nil
 }
 
 func main() {

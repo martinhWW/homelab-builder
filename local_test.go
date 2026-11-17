@@ -65,6 +65,56 @@ func stubInstallK3s(t *testing.T, err error) (*string, *bool) {
 	return &gotName, &called
 }
 
+// fakeKubeconfig is what k3s writes inside the VM: the server points at
+// localhost, which createLocal must rewrite to the VM's IP.
+const fakeKubeconfig = "clusters:\n- cluster:\n    server: https://127.0.0.1:6443\n  name: default\n"
+
+// stubGetVMInfo replaces getVmInfo with a fake that returns data and err,
+// so tests never run `multipass info`. Restored when the test ends.
+func stubGetVMInfo(t *testing.T, data string, err error) {
+	t.Helper()
+	orig := getVmInfo
+	getVmInfo = func(name string) ([]byte, error) {
+		return []byte(data), err
+	}
+	t.Cleanup(func() { getVmInfo = orig })
+}
+
+// stubGetKubeconfig replaces getKubeconfig with a fake that returns data and
+// err, so tests never read from a VM. Restored when the test ends.
+func stubGetKubeconfig(t *testing.T, data string, err error) {
+	t.Helper()
+	orig := getKubeconfig
+	getKubeconfig = func(name string) ([]byte, error) {
+		return []byte(data), err
+	}
+	t.Cleanup(func() { getKubeconfig = orig })
+}
+
+// stubWaitForNodeReady replaces waitForNodeReadyCheck with a fake that returns
+// err immediately, so tests never poll a real VM. Restored when the test ends.
+func stubWaitForNodeReady(t *testing.T, err error) {
+	t.Helper()
+	orig := waitForNodeReadyCheck
+	waitForNodeReadyCheck = func(name string) error {
+		return err
+	}
+	t.Cleanup(func() { waitForNodeReadyCheck = orig })
+}
+
+// stubKubeconfigSteps stubs the happy path for fetching the kubeconfig and
+// waiting for the node, and points HOME at a temp dir so tests never write to
+// the real ~/.homelab. It returns the temp home dir.
+func stubKubeconfigSteps(t *testing.T, name string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stubGetVMInfo(t, `{"info": {"`+name+`": {"ipv4": ["192.168.64.5"]}}}`, nil)
+	stubGetKubeconfig(t, fakeKubeconfig, nil)
+	stubWaitForNodeReady(t, nil)
+	return home
+}
+
 func TestBuildMultipassLaunchArgs(t *testing.T) {
 	got := buildMultipassLaunchArgs("homelab-node-1")
 	want := []string{
@@ -104,5 +154,41 @@ func TestInstanceExists(t *testing.T) {
 				t.Errorf("instanceExists() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseVMIP(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		lookup  string
+		want    string
+		wantErr bool
+	}{
+		{"single ip", `{"errors": [], "info": {"mylab": {"ipv4": ["192.168.64.5"], "state": "Running"}}}`, "mylab", "192.168.64.5", false},
+		{"first of several ips", `{"info": {"mylab": {"ipv4": ["192.168.64.5", "10.42.0.0"]}}}`, "mylab", "192.168.64.5", false},
+		{"vm not in output", `{"info": {"other": {"ipv4": ["192.168.64.9"]}}}`, "mylab", "", true},
+		{"no ipv4 addresses", `{"info": {"mylab": {"ipv4": []}}}`, "mylab", "", true},
+		{"invalid json", `not json`, "mylab", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseVMIP([]byte(tt.data), tt.lookup)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseVMIP() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("parseVMIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetKubeconfigServer(t *testing.T) {
+	data := []byte("clusters:\n- cluster:\n    certificate-authority-data: LS0tLS1CRUdJTg==\n    server: https://127.0.0.1:6443\n  name: default\n")
+	want := "clusters:\n- cluster:\n    certificate-authority-data: LS0tLS1CRUdJTg==\n    server: https://192.168.64.5:6443\n  name: default\n"
+	got := setKubeconfigServer(data, "192.168.64.5")
+	if string(got) != want {
+		t.Errorf("setKubeconfigServer() = %q, want %q", got, want)
 	}
 }
