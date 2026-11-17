@@ -18,6 +18,8 @@ var installK3s = installK3sOnVm
 var getVmInfo = vmInfo
 var getKubeconfig = fetchKubeconfig
 var waitForNodeReadyCheck = waitForNodeReady
+var listInstances = checkMultipass
+var checkNodeReady = nodeReady
 
 func createLocal(w io.Writer, name string) error {
 	// Check if Multipass is installed on the host machine
@@ -90,6 +92,40 @@ func createLocal(w io.Writer, name string) error {
 	}
 	fmt.Fprintf(w, "connect to k3s cluster using kubeconfig: export KUBECONFIG=%q\n", pathToKubeconfig)
 
+	return nil
+}
+
+func statusLocal(w io.Writer, name string) error {
+	output, err := listInstances()
+	if err != nil {
+		return err
+	}
+	instance, found, err := findInstance(output, name)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("homelab %q not found", name)
+	}
+	ip := "none"
+	if len(instance.IPv4) > 0 {
+		ip = instance.IPv4[0]
+	}
+	fmt.Fprintf(w, "State: %s\nIP: %s\n", instance.State, ip)
+	if instance.State == "Running" {
+		status, err := checkNodeReady(name)
+		if err != nil {
+			fmt.Fprintf(w, "K3s Node Status: unknown (%v)\n", err)
+			return nil
+		}
+		if status {
+			fmt.Fprintln(w, "K3s Node Status: Ready")
+		} else {
+			fmt.Fprintln(w, "K3s Node Status: NotReady")
+		}
+	} else {
+		fmt.Fprintln(w, "K3s Node Status: n/a")
+	}
 	return nil
 }
 
@@ -184,16 +220,22 @@ func verifyK3sExists(name string) (bool, error) {
 }
 
 func instanceExists(data []byte, name string) (bool, error) {
+	_, found, err := findInstance(data, name)
+	return found, err
+}
+
+// findInstance looks up the named instance in `multipass list --format json` output.
+func findInstance(data []byte, name string) (MultipassInstance, bool, error) {
 	var list MultipassList
 	if err := json.Unmarshal(data, &list); err != nil {
-		return false, fmt.Errorf("parsing multipass list output: %w", err)
+		return MultipassInstance{}, false, fmt.Errorf("parsing multipass list output: %w", err)
 	}
 	for _, instance := range list.Instances {
 		if instance.Name == name {
-			return true, nil
+			return instance, true, nil
 		}
 	}
-	return false, nil
+	return MultipassInstance{}, false, nil
 }
 
 func fetchKubeconfig(name string) ([]byte, error) {
@@ -202,6 +244,17 @@ func fetchKubeconfig(name string) ([]byte, error) {
 		return nil, fmt.Errorf("reading kubeconfig from VM %q: %w", name, err)
 	}
 	return output, nil
+}
+
+func nodeReady(name string) (bool, error) {
+	output, err := runMultipass("exec", name, "--", "sudo", "k3s", "kubectl", "get", "nodes", "-o", `jsonpath={.items[*].status.conditions[?(@.type=="Ready")].status}`)
+	if err != nil {
+		return false, fmt.Errorf("checking node readiness on %q: %w", name, err)
+	}
+	if strings.TrimSpace(string(output)) == "True" {
+		return true, nil
+	}
+	return false, nil
 }
 
 func nodeReadyCheck(name string) error {
@@ -256,7 +309,8 @@ type MultipassInfo struct {
 }
 
 type MultipassVMInfo struct {
-	IPv4 []string `json:"ipv4"`
+	IPv4  []string `json:"ipv4"`
+	State string   `json:"state"`
 }
 
 type MultipassList struct {
@@ -264,5 +318,7 @@ type MultipassList struct {
 }
 
 type MultipassInstance struct {
-	Name string `json:"name"`
+	Name  string   `json:"name"`
+	State string   `json:"state"`
+	IPv4  []string `json:"ipv4"`
 }

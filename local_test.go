@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -157,6 +160,41 @@ func TestInstanceExists(t *testing.T) {
 	}
 }
 
+func TestFindInstance(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      string
+		lookup    string
+		wantFound bool
+		wantState string
+		wantIPv4  []string
+		wantErr   bool
+	}{
+		{"running with ip", `{"list": [{"name": "homelab", "state": "Running", "ipv4": ["192.168.64.5"]}]}`, "homelab", true, "Running", []string{"192.168.64.5"}, false},
+		{"stopped without ip", `{"list": [{"name": "homelab", "state": "Stopped", "ipv4": []}]}`, "homelab", true, "Stopped", []string{}, false},
+		{"picks the named instance", `{"list": [{"name": "other", "state": "Running"}, {"name": "homelab", "state": "Suspended"}]}`, "homelab", true, "Suspended", nil, false},
+		{"missing", `{"list": [{"name": "other", "state": "Running"}]}`, "homelab", false, "", nil, false},
+		{"invalid json", `not json`, "homelab", false, "", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, found, err := findInstance([]byte(tt.data), tt.lookup)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("findInstance() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if found != tt.wantFound {
+				t.Fatalf("findInstance() found = %v, want %v", found, tt.wantFound)
+			}
+			if got.State != tt.wantState {
+				t.Errorf("findInstance() State = %q, want %q", got.State, tt.wantState)
+			}
+			if !slices.Equal(got.IPv4, tt.wantIPv4) {
+				t.Errorf("findInstance() IPv4 = %v, want %v", got.IPv4, tt.wantIPv4)
+			}
+		})
+	}
+}
+
 func TestParseVMIP(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -190,5 +228,110 @@ func TestSetKubeconfigServer(t *testing.T) {
 	got := setKubeconfigServer(data, "192.168.64.5")
 	if string(got) != want {
 		t.Errorf("setKubeconfigServer() = %q, want %q", got, want)
+	}
+}
+
+// stubListInstances replaces listInstances with a fake that returns data and
+// err, so tests never run `multipass list`. Restored when the test ends.
+func stubListInstances(t *testing.T, data string, err error) {
+	t.Helper()
+	orig := listInstances
+	listInstances = func() ([]byte, error) {
+		return []byte(data), err
+	}
+	t.Cleanup(func() { listInstances = orig })
+}
+
+// stubCheckNodeReady replaces checkNodeReady with a fake that returns ready and
+// err, so tests never run kubectl in a VM. The returned bool reports whether it
+// was called. Restored when the test ends.
+func stubCheckNodeReady(t *testing.T, ready bool, err error) *bool {
+	t.Helper()
+	var called bool
+	orig := checkNodeReady
+	checkNodeReady = func(name string) (bool, error) {
+		called = true
+		return ready, err
+	}
+	t.Cleanup(func() { checkNodeReady = orig })
+	return &called
+}
+
+func TestStatusLocal(t *testing.T) {
+	const running = `{"list": [{"name": "homelab", "state": "Running", "ipv4": ["192.168.64.5"]}]}`
+	tests := []struct {
+		name          string
+		list          string
+		listErr       error
+		ready         bool
+		readyErr      error
+		want          string
+		wantErr       string
+		wantNodeCheck bool
+	}{
+		{
+			name:          "running and ready",
+			list:          running,
+			ready:         true,
+			want:          "State: Running\nIP: 192.168.64.5\nK3s Node Status: Ready\n",
+			wantNodeCheck: true,
+		},
+		{
+			name:          "running but not ready",
+			list:          running,
+			ready:         false,
+			want:          "State: Running\nIP: 192.168.64.5\nK3s Node Status: NotReady\n",
+			wantNodeCheck: true,
+		},
+		{
+			name:          "running but unreachable",
+			list:          running,
+			readyErr:      errors.New("no route to host"),
+			want:          "State: Running\nIP: 192.168.64.5\nK3s Node Status: unknown (no route to host)\n",
+			wantNodeCheck: true,
+		},
+		{
+			name: "stopped skips node check",
+			list: `{"list": [{"name": "homelab", "state": "Stopped", "ipv4": []}]}`,
+			want: "State: Stopped\nIP: none\nK3s Node Status: n/a\n",
+		},
+		{
+			name:    "missing",
+			list:    `{"list": [{"name": "other", "state": "Running"}]}`,
+			wantErr: `homelab "homelab" not found`,
+		},
+		{
+			name:    "multipass list fails",
+			listErr: errors.New("multipass not found"),
+			wantErr: "multipass not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubListInstances(t, tt.list, tt.listErr)
+			called := stubCheckNodeReady(t, tt.ready, tt.readyErr)
+			var buf bytes.Buffer
+
+			err := statusLocal(&buf, "homelab")
+
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("statusLocal() error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				if buf.Len() != 0 {
+					t.Errorf("Expected no output on error, got: %q", buf.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("statusLocal() unexpected error: %v", err)
+			}
+			if buf.String() != tt.want {
+				t.Errorf("statusLocal() output = %q, want %q", buf.String(), tt.want)
+			}
+			if *called != tt.wantNodeCheck {
+				t.Errorf("node readiness checked = %v, want %v", *called, tt.wantNodeCheck)
+			}
+		})
 	}
 }

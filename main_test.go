@@ -235,18 +235,23 @@ func TestCreateK3sInstallFails(t *testing.T) {
 	}
 }
 
-func TestCreateWithFlags(t *testing.T) {
-	rootCmd := newRootCommand()
-	var buf bytes.Buffer
-	rootCmd.SetOut(&buf)
-	rootCmd.SetArgs([]string{"create", "--provider", "aws", "-n", "3"})
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("Error executing command: %v", err)
-	}
-	want := "Creating a new homelab environment: homelab\nProvider: aws\nNodes: 3\n"
-	if buf.String() != want {
-		t.Errorf("Expected output: %q, got: %q", want, buf.String())
+func TestUnsupportedProviderRejected(t *testing.T) {
+	for _, command := range []string{"create", "status"} {
+		for _, provider := range []string{"aws", "gcp"} {
+			t.Run(command+"/"+provider, func(t *testing.T) {
+				rootCmd := newRootCommand()
+				var buf bytes.Buffer
+				rootCmd.SetOut(&buf)
+				rootCmd.SetArgs([]string{command, "--provider", provider})
+				err := rootCmd.Execute()
+				if err == nil || !strings.Contains(err.Error(), "not yet supported") {
+					t.Fatalf("Expected a not-yet-supported error, got: %v", err)
+				}
+				if buf.Len() != 0 {
+					t.Errorf("Expected no output for unsupported provider, got: %q", buf.String())
+				}
+			})
+		}
 	}
 }
 
@@ -264,7 +269,7 @@ func TestCreateInvalidInput(t *testing.T) {
 	}
 }
 
-func TestValidateCreateInputsNodes(t *testing.T) {
+func TestValidateNodesFlag(t *testing.T) {
 	tests := []struct {
 		nodes   int
 		wantErr bool
@@ -277,7 +282,7 @@ func TestValidateCreateInputsNodes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("nodes=%d", tt.nodes), func(t *testing.T) {
-			err := validateCreateInputs("local", tt.nodes, "homelab")
+			err := validateNodesFlag(tt.nodes)
 			if tt.wantErr && err == nil {
 				t.Errorf("Expected an error for %d nodes, got nil", tt.nodes)
 			}
@@ -288,21 +293,21 @@ func TestValidateCreateInputsNodes(t *testing.T) {
 	}
 }
 
-func TestValidateCreateInputsProvider(t *testing.T) {
+func TestValidateProviderFlag(t *testing.T) {
 	tests := []struct {
 		provider string
 		wantErr  bool
 	}{
 		{"local", false},
-		{"aws", false},
-		{"gcp", false},
+		{"aws", true},
+		{"gcp", true},
 		{"", true},
 		{"banana", true},
 		{"AWS", true},
 	}
 	for _, tt := range tests {
 		t.Run("provider="+tt.provider, func(t *testing.T) {
-			err := validateCreateInputs(tt.provider, 1, "homelab")
+			err := validateProviderFlag(tt.provider)
 			if tt.wantErr && err == nil {
 				t.Errorf("Expected an error for provider %q, got nil", tt.provider)
 			}
@@ -313,7 +318,7 @@ func TestValidateCreateInputsProvider(t *testing.T) {
 	}
 }
 
-func TestValidateCreateInputsName(t *testing.T) {
+func TestValidateNameFlag(t *testing.T) {
 	tests := []struct {
 		name    string
 		wantErr bool
@@ -335,7 +340,7 @@ func TestValidateCreateInputsName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run("name="+tt.name, func(t *testing.T) {
-			err := validateCreateInputs("local", 1, tt.name)
+			err := validateNameFlag(tt.name)
 			if tt.wantErr && err == nil {
 				t.Errorf("Expected an error for name %q, got nil", tt.name)
 			}

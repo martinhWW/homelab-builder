@@ -45,6 +45,7 @@ func newRootCommand() *cobra.Command {
 		},
 	)
 	rootCmd.AddCommand(newCreateCommand())
+	rootCmd.AddCommand(newStatusCommand())
 	return rootCmd
 }
 
@@ -57,7 +58,13 @@ func newCreateCommand() *cobra.Command {
 		Short: "Create a new homelab environment",
 		Long:  "Create a new homelab environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateCreateInputs(provider, numNodes, environmentName); err != nil {
+			if err := validateNameFlag(environmentName); err != nil {
+				return err
+			}
+			if err := validateProviderFlag(provider); err != nil {
+				return err
+			}
+			if err := validateNodesFlag(numNodes); err != nil {
 				return err
 			}
 
@@ -78,13 +85,53 @@ func newCreateCommand() *cobra.Command {
 	return cmd
 }
 
-func validateCreateInputs(provider string, nodes int, name string) error {
+func newStatusCommand() *cobra.Command {
+	var provider string
+	var name string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Print status of homelab env",
+		Long:  "Print status of specified homelab environment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateNameFlag(name); err != nil {
+				return err
+			}
+			if err := validateProviderFlag(provider); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Retrieving Homelab Status...\nName: %s\nProvider: %s\n", name, provider)
+
+			switch provider {
+			case "aws":
+			case "gcp":
+			case "local":
+				return statusLocal(cmd.OutOrStdout(), name)
+			}
+
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&provider, "provider", "p", "local", "The provider to use for the homelab environment (aws, gcp, local)")
+	cmd.Flags().StringVar(&name, "name", "homelab", "The name of the lab environment")
+	return cmd
+}
+
+func validateProviderFlag(provider string) error {
 	if provider != "local" && provider != "aws" && provider != "gcp" {
 		return fmt.Errorf("invalid provider: %s: must be aws, gcp, or local", provider)
 	}
+	if provider == "aws" || provider == "gcp" {
+		return fmt.Errorf("provider %s is not yet supported", provider)
+	}
+	return nil
+}
+func validateNodesFlag(nodes int) error {
 	if nodes < 1 || nodes > 15 {
 		return fmt.Errorf("invalid number of nodes: %d: must be greater than 0 and no greater than 15", nodes)
 	}
+	return nil
+}
+func validateNameFlag(name string) error {
 	if !validName.MatchString(name) {
 		return fmt.Errorf("invalid name: %q: must start with a lowercase letter, end with a lowercase letter or digit, contain only lowercase letters, digits, or hyphens, and be at most 63 characters", name)
 	}
