@@ -93,17 +93,29 @@ func createLocal(w io.Writer, name string) error {
 	return nil
 }
 
+// runMultipass runs a multipass subcommand and returns its stdout. On a
+// non-zero exit, the returned error includes multipass's stderr.
+func runMultipass(args ...string) ([]byte, error) {
+	output, err := exec.Command("multipass", args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+				return nil, fmt.Errorf("%w: %s", err, stderr)
+			}
+		}
+		return nil, err
+	}
+	return output, nil
+}
+
 func checkMultipass() ([]byte, error) {
 	_, err := exec.LookPath("multipass")
 	if err != nil {
 		return nil, fmt.Errorf("multipass not found: %w: install it from https://multipass.run/install", err)
 	}
-	output, err := exec.Command("multipass", "list", "--format", "json").Output()
+	output, err := runMultipass("list", "--format", "json")
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("command 'multipass list' failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
 		return nil, fmt.Errorf("command 'multipass list' failed: %w", err)
 	}
 	return output, nil
@@ -120,12 +132,7 @@ func launchInstance(w io.Writer, args []string) error {
 }
 
 func verifyInstance(name string) error {
-	_, err := exec.Command("multipass", "exec", name, "--", "true").Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("connection to VM %q failed: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
+	if _, err := runMultipass("exec", name, "--", "true"); err != nil {
 		return fmt.Errorf("connection to VM %q failed: %w", name, err)
 	}
 	return nil
@@ -164,7 +171,7 @@ func installK3sOnVm(w io.Writer, name string) error {
 }
 
 func verifyK3sExists(name string) (bool, error) {
-	_, err := exec.Command("multipass", "exec", name, "--", "which", "k3s").Output()
+	_, err := runMultipass("exec", name, "--", "which", "k3s")
 	if err == nil {
 		return true, nil
 	}
@@ -190,24 +197,15 @@ func instanceExists(data []byte, name string) (bool, error) {
 }
 
 func fetchKubeconfig(name string) ([]byte, error) {
-	output, err := exec.Command("multipass", "exec", name, "--", "sudo", "cat", "/etc/rancher/k3s/k3s.yaml").Output()
+	output, err := runMultipass("exec", name, "--", "sudo", "cat", "/etc/rancher/k3s/k3s.yaml")
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("reading kubeconfig from VM %q: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
 		return nil, fmt.Errorf("reading kubeconfig from VM %q: %w", name, err)
 	}
 	return output, nil
 }
 
 func nodeReadyCheck(name string) error {
-	_, err := exec.Command("multipass", "exec", name, "--", "sudo", "k3s", "kubectl", "wait", "--for=condition=Ready", "node", "--all", "--timeout=10s").Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
+	if _, err := runMultipass("exec", name, "--", "sudo", "k3s", "kubectl", "wait", "--for=condition=Ready", "node", "--all", "--timeout=10s"); err != nil {
 		return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w", name, err)
 	}
 	return nil
@@ -227,12 +225,8 @@ func waitForNodeReady(name string) error {
 }
 
 func vmInfo(name string) ([]byte, error) {
-	output, err := exec.Command("multipass", "info", name, "--format", "json").Output()
+	output, err := runMultipass("info", name, "--format", "json")
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("command 'multipass info' failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
 		return nil, fmt.Errorf("command 'multipass info' failed: %w", err)
 	}
 	return output, nil
