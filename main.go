@@ -1,21 +1,15 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"regexp"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 var version string
-var launch = launchInstance
-var verify = verifyInstance
 
 // validName matches a name every provider accepts (Multipass, AWS, GCP): starts
 // with a lowercase letter, ends with a lowercase letter or digit, only lowercase
@@ -73,29 +67,7 @@ func newCreateCommand() *cobra.Command {
 			case "aws":
 			case "gcp":
 			case "local":
-				output, err := checkMultipass()
-				if err != nil {
-					return err
-				}
-				exists, err := instanceExists(output, environmentName)
-				if err != nil {
-					return err
-				}
-				if exists {
-					return fmt.Errorf("homelab instance %q already exists: choose a different name with --name", environmentName)
-				}
-
-				launchArgs := buildMultipassLaunchArgs(environmentName)
-				fmt.Fprintf(cmd.OutOrStdout(), "multipass %s\n", strings.Join(launchArgs, " "))
-				err = launch(cmd.OutOrStdout(), launchArgs)
-				if err != nil {
-					return err
-				}
-				err = verify(environmentName)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "vm %q is ready\n", environmentName)
+				return createLocal(cmd.OutOrStdout(), environmentName)
 			}
 			return nil
 		},
@@ -104,59 +76,6 @@ func newCreateCommand() *cobra.Command {
 	cmd.Flags().IntVarP(&numNodes, "nodes", "n", 1, "The number of nodes to create for the homelab environment")
 	cmd.Flags().StringVar(&environmentName, "name", "homelab", "The name of the lab environment")
 	return cmd
-}
-
-func checkMultipass() ([]byte, error) {
-	_, err := exec.LookPath("multipass")
-	if err != nil {
-		return nil, fmt.Errorf("multipass not found: %w: install it from https://multipass.run/install", err)
-	}
-	output, err := exec.Command("multipass", "list", "--format", "json").Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("command 'multipass list' failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return nil, fmt.Errorf("command 'multipass list' failed: %w", err)
-	}
-	return output, nil
-}
-
-func launchInstance(w io.Writer, args []string) error {
-	c := exec.Command("multipass", args...)
-	c.Stdout = w
-	c.Stderr = w
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("multipass launch failed: %w", err)
-	}
-	return nil
-}
-
-func verifyInstance(name string) error {
-	_, err := exec.Command("multipass", "exec", name, "--", "true").Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("connection to VM %q failed: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return fmt.Errorf("connection to VM %q failed: %w", name, err)
-	}
-	return nil
-}
-
-func buildMultipassLaunchArgs(name string) []string {
-	return []string{
-		"launch",
-		"24.04",
-		"--name",
-		name,
-		"--cpus",
-		"2",
-		"--memory",
-		"4G",
-		"--disk",
-		"30G",
-	}
 }
 
 func validateCreateInputs(provider string, nodes int, name string) error {
@@ -176,25 +95,25 @@ func createHeader(provider string, nodes int, name string) string {
 	return fmt.Sprintf("Creating a new homelab environment: %s\nProvider: %s\nNodes: %d\n", name, provider, nodes)
 }
 
-func instanceExists(data []byte, name string) (bool, error) {
-	var list MultipassList
-	if err := json.Unmarshal(data, &list); err != nil {
-		return false, fmt.Errorf("parsing multipass list output: %w", err)
+func environmentDir(name string) (string, error) {
+	homepath, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding home directory: %w", err)
 	}
-	for _, instance := range list.Instances {
-		if instance.Name == name {
-			return true, nil
-		}
-	}
-	return false, nil
+	return filepath.Join(homepath, ".homelab", name), nil
 }
 
-type MultipassList struct {
-	Instances []MultipassInstance `json:"list"`
-}
-
-type MultipassInstance struct {
-	Name string `json:"name"`
+func saveKubeconfig(dir string, data []byte) (string, error) {
+	err := os.MkdirAll(dir, 0700)
+	if err != nil {
+		return "", fmt.Errorf("creating environment directory: %w", err)
+	}
+	pathToFile := filepath.Join(dir, "kubeconfig")
+	err = os.WriteFile(pathToFile, data, 0600)
+	if err != nil {
+		return "", fmt.Errorf("writing kubeconfig: %w", err)
+	}
+	return pathToFile, nil
 }
 
 func main() {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -33,37 +35,12 @@ func TestUnknownCommand(t *testing.T) {
 	}
 }
 
-// stubLaunch replaces launch with a fake that records its args and returns err,
-// so tests never start a real VM. The original is restored when the test ends.
-func stubLaunch(t *testing.T, err error) *[]string {
-	t.Helper()
-	var gotArgs []string
-	orig := launch
-	launch = func(w io.Writer, args []string) error {
-		gotArgs = args
-		return err
-	}
-	t.Cleanup(func() { launch = orig })
-	return &gotArgs
-}
-
-// stubVerify replaces verify with a fake that records the instance name and
-// returns err, so tests never run `multipass exec`. Restored when the test ends.
-func stubVerify(t *testing.T, err error) *string {
-	t.Helper()
-	var gotName string
-	orig := verify
-	verify = func(name string) error {
-		gotName = name
-		return err
-	}
-	t.Cleanup(func() { verify = orig })
-	return &gotName
-}
-
 func TestCreate(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
 	gotName := stubVerify(t, nil)
+	gotCheckName := stubVerifyK3s(t, false, nil)
+	gotInstallName, _ := stubInstallK3s(t, nil)
+	home := stubKubeconfigSteps(t, "homelab")
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -74,7 +51,24 @@ func TestCreate(t *testing.T) {
 	}
 	want := "Creating a new homelab environment: homelab\nProvider: local\nNodes: 1\n" +
 		"multipass launch 24.04 --name homelab --cpus 2 --memory 4G --disk 30G\n" +
-		"vm \"homelab\" is ready\n"
+		"vm \"homelab\" is ready\n" +
+		"k3s has been installed on VM \"homelab\"\n" +
+		"waiting for node to be ready...\n"
+	kubeconfigPath := filepath.Join(home, ".homelab", "homelab", "kubeconfig")
+	want += fmt.Sprintf("connect to k3s cluster using kubeconfig: export KUBECONFIG=%q\n", kubeconfigPath)
+	saved, err := os.ReadFile(kubeconfigPath)
+	if err != nil {
+		t.Fatalf("reading saved kubeconfig: %v", err)
+	}
+	if !strings.Contains(string(saved), "server: https://192.168.64.5:6443") {
+		t.Errorf("saved kubeconfig server not rewritten to VM IP, got: %q", saved)
+	}
+	if *gotCheckName != "homelab" {
+		t.Errorf("verifyK3s called with %q, want %q", *gotCheckName, "homelab")
+	}
+	if *gotInstallName != "homelab" {
+		t.Errorf("installK3s called with %q, want %q", *gotInstallName, "homelab")
+	}
 	if buf.String() != want {
 		t.Errorf("Expected output: %q, got: %q", want, buf.String())
 	}
@@ -116,6 +110,9 @@ func TestCreateLaunchFails(t *testing.T) {
 func TestCreateWithName(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
 	gotName := stubVerify(t, nil)
+	stubVerifyK3s(t, false, nil)
+	gotInstallName, _ := stubInstallK3s(t, nil)
+	stubKubeconfigSteps(t, "mylab")
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -133,6 +130,108 @@ func TestCreateWithName(t *testing.T) {
 	}
 	if *gotName != "mylab" {
 		t.Errorf("verify called with %q, want %q", *gotName, "mylab")
+	}
+	if *gotInstallName != "mylab" {
+		t.Errorf("installK3s called with %q, want %q", *gotInstallName, "mylab")
+	}
+}
+
+func TestCreateK3sAlreadyInstalled(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, true, nil)
+	_, called := stubInstallK3s(t, nil)
+	home := stubKubeconfigSteps(t, "k3slab")
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Error executing command: %v", err)
+	}
+	if *called {
+		t.Error("installK3s was called, but k3s was already installed")
+	}
+	if !strings.Contains(buf.String(), "k3s is already installed on VM \"k3slab\"") {
+		t.Errorf("Expected already-installed message, got: %q", buf.String())
+	}
+	// Re-running create must still save the kubeconfig.
+	if _, err := os.Stat(filepath.Join(home, ".homelab", "k3slab", "kubeconfig")); err != nil {
+		t.Errorf("Expected kubeconfig to be saved when k3s was already installed: %v", err)
+	}
+}
+
+func TestCreateVMInfoFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, true, nil)
+	stubInstallK3s(t, nil)
+	stubKubeconfigSteps(t, "k3slab")
+	stubGetVMInfo(t, "", errors.New("info broke"))
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "info broke") {
+		t.Fatalf("Expected vm info error to be returned, got: %v", err)
+	}
+	if strings.Contains(buf.String(), "KUBECONFIG") {
+		t.Errorf("Expected no connect message when vm info fails, got: %q", buf.String())
+	}
+}
+
+func TestCreateGetKubeconfigFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, true, nil)
+	stubInstallK3s(t, nil)
+	home := stubKubeconfigSteps(t, "k3slab")
+	stubGetKubeconfig(t, "", errors.New("read broke"))
+	rootCmd := newRootCommand()
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "read broke") {
+		t.Fatalf("Expected kubeconfig read error to be returned, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".homelab", "k3slab", "kubeconfig")); err == nil {
+		t.Error("Expected no kubeconfig file when reading it from the VM fails")
+	}
+}
+
+func TestCreateK3sCheckFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, false, errors.New("check broke"))
+	_, called := stubInstallK3s(t, nil)
+	rootCmd := newRootCommand()
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "check broke") {
+		t.Fatalf("Expected verifyK3s error to be returned, got: %v", err)
+	}
+	if *called {
+		t.Error("installK3s was called after the k3s check failed")
+	}
+}
+
+func TestCreateK3sInstallFails(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, false, nil)
+	stubInstallK3s(t, errors.New("install broke"))
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "install broke") {
+		t.Fatalf("Expected installK3s error to be returned, got: %v", err)
+	}
+	if strings.Contains(buf.String(), "has been installed") {
+		t.Errorf("Expected no success message when install fails, got: %q", buf.String())
 	}
 }
 
@@ -214,20 +313,6 @@ func TestValidateCreateInputsProvider(t *testing.T) {
 	}
 }
 
-func TestBuildMultipassLaunchArgs(t *testing.T) {
-	got := buildMultipassLaunchArgs("homelab-node-1")
-	want := []string{
-		"launch", "24.04",
-		"--name", "homelab-node-1",
-		"--cpus", "2",
-		"--memory", "4G",
-		"--disk", "30G",
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("Expected args: %q, got: %q", want, got)
-	}
-}
-
 func TestValidateCreateInputsName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -269,30 +354,103 @@ func TestCreateHeader(t *testing.T) {
 	}
 }
 
-func TestInstanceExists(t *testing.T) {
-	tests := []struct {
-		name    string
-		data    string
-		lookup  string
-		want    bool
-		wantErr bool
-	}{
-		{"empty list", `{"list": []}`, "homelab", false, false},
-		{"match", `{"list": [{"name": "homelab", "state": "Running"}]}`, "homelab", true, false},
-		{"no match", `{"list": [{"name": "other"}]}`, "homelab", false, false},
-		{"match among several", `{"list": [{"name": "a"}, {"name": "homelab"}]}`, "homelab", true, false},
-		{"prefix is not a match", `{"list": [{"name": "homelab-2"}]}`, "homelab", false, false},
-		{"invalid json", `not json`, "homelab", false, true},
+func TestEnvironmentDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	got, err := environmentDir("mylab")
+	if err != nil {
+		t.Fatalf("environmentDir() error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := instanceExists([]byte(tt.data), tt.lookup)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("instanceExists() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Errorf("instanceExists() = %v, want %v", got, tt.want)
-			}
-		})
+	want := filepath.Join(home, ".homelab", "mylab")
+	if got != want {
+		t.Errorf("environmentDir() = %q, want %q", got, want)
+	}
+}
+
+func TestEnvironmentDirNoHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	_, err := environmentDir("mylab")
+	if err == nil || !strings.Contains(err.Error(), "finding home directory") {
+		t.Fatalf("Expected home directory error, got: %v", err)
+	}
+}
+
+func TestSaveKubeconfig(t *testing.T) {
+	// Nested path checks that missing parents (like ~/.homelab) are created.
+	dir := filepath.Join(t.TempDir(), ".homelab", "mylab")
+	data := []byte("apiVersion: v1\n")
+
+	gotPath, err := saveKubeconfig(dir, data)
+	if err != nil {
+		t.Fatalf("saveKubeconfig() error = %v", err)
+	}
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0700 {
+		t.Errorf("dir permissions = %o, want 700", perm)
+	}
+
+	path := filepath.Join(dir, "kubeconfig")
+	if gotPath != path {
+		t.Errorf("saveKubeconfig() path = %q, want %q", gotPath, path)
+	}
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat kubeconfig: %v", err)
+	}
+	if perm := fileInfo.Mode().Perm(); perm != 0600 {
+		t.Errorf("kubeconfig permissions = %o, want 600", perm)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read kubeconfig: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("kubeconfig contents = %q, want %q", got, data)
+	}
+}
+
+func TestSaveKubeconfigExistingDir(t *testing.T) {
+	// Re-running create on an existing environment must not fail.
+	dir := filepath.Join(t.TempDir(), "mylab")
+	if _, err := saveKubeconfig(dir, []byte("old")); err != nil {
+		t.Fatalf("first saveKubeconfig() error = %v", err)
+	}
+	if _, err := saveKubeconfig(dir, []byte("new")); err != nil {
+		t.Fatalf("second saveKubeconfig() error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "kubeconfig"))
+	if err != nil {
+		t.Fatalf("read kubeconfig: %v", err)
+	}
+	if string(got) != "new" {
+		t.Errorf("kubeconfig contents = %q, want %q", got, "new")
+	}
+}
+
+func TestCreateNodeNotReady(t *testing.T) {
+	stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, true, nil)
+	stubInstallK3s(t, nil)
+	home := stubKubeconfigSteps(t, "k3slab")
+	stubWaitForNodeReady(t, errors.New("node not ready"))
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"create", "--name", "k3slab"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "node not ready") {
+		t.Fatalf("Expected node readiness error to be returned, got: %v", err)
+	}
+	if strings.Contains(buf.String(), "KUBECONFIG") {
+		t.Errorf("Expected no connect message when node is not ready, got: %q", buf.String())
+	}
+	// The kubeconfig is saved before waiting, so it's there for debugging.
+	if _, err := os.Stat(filepath.Join(home, ".homelab", "k3slab", "kubeconfig")); err != nil {
+		t.Errorf("Expected kubeconfig to be saved even when the node is not ready: %v", err)
 	}
 }
