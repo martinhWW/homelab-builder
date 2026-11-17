@@ -206,7 +206,7 @@ func nodeReadyCheck(name string) error {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return fmt.Errorf("waiting for k3s node on VM %q to ready: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
+			return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w: %s", name, err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w", name, err)
 	}
