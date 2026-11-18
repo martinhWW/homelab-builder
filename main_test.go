@@ -53,13 +53,17 @@ func TestCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error executing command: %v", err)
 	}
-	want := "Creating a new homelab environment: homelab\nProvider: local\nNodes: 1\n" +
-		"multipass launch 24.04 --name homelab --cpus 2 --memory 4G --disk 30G\n" +
-		"vm \"homelab\" is ready\n" +
-		"k3s has been installed on VM \"homelab\"\n" +
-		"waiting for node to be ready...\n"
+	want := "→ Creating homelab \"homelab\"...\n  Name:      homelab\n  Provider:  local\n  Nodes:     1\n" +
+		"→ Launching VM \"homelab\"...\n" +
+		"  multipass launch 24.04 --name homelab --cpus 2 --memory 4G --disk 30G\n" +
+		"✓ VM \"homelab\" is up and reachable\n" +
+		"→ Installing k3s...\n" +
+		"✓ k3s installed\n" +
+		"→ Waiting for node to be ready...\n" +
+		"🚀 Homelab \"homelab\" is ready!\n" +
+		"  Connect with:\n"
 	kubeconfigPath := filepath.Join(home, ".homelab", "homelab", "kubeconfig")
-	want += fmt.Sprintf("connect to k3s cluster using kubeconfig: export KUBECONFIG=%q\n", kubeconfigPath)
+	want += fmt.Sprintf("  export KUBECONFIG=%q\n", kubeconfigPath)
 	saved, err := os.ReadFile(kubeconfigPath)
 	if err != nil {
 		t.Fatalf("reading saved kubeconfig: %v", err)
@@ -160,7 +164,7 @@ func TestCreateK3sAlreadyInstalled(t *testing.T) {
 	if *called {
 		t.Error("installK3s was called, but k3s was already installed")
 	}
-	if !strings.Contains(buf.String(), "k3s is already installed on VM \"k3slab\"") {
+	if !strings.Contains(buf.String(), "• k3s already installed, skipping") {
 		t.Errorf("Expected already-installed message, got: %q", buf.String())
 	}
 	// Re-running create must still save the kubeconfig.
@@ -365,7 +369,7 @@ func TestValidateNameFlag(t *testing.T) {
 
 func TestCreateHeader(t *testing.T) {
 	got := createHeader("aws", 3, "mylab")
-	want := "Creating a new homelab environment: mylab\nProvider: aws\nNodes: 3\n"
+	want := "→ Creating homelab \"mylab\"...\n  Name:      mylab\n  Provider:  aws\n  Nodes:     3\n"
 	if got != want {
 		t.Errorf("Expected header: %q, got: %q", want, got)
 	}

@@ -277,27 +277,27 @@ func TestStatusLocal(t *testing.T) {
 			name:          "running and ready",
 			list:          running,
 			ready:         true,
-			want:          "State: Running\nIP: 192.168.64.5\nK3s Node Status: Ready\n",
+			want:          "  State:     Running\n  IP:        192.168.64.5\n  k3s node:  ✓ Ready\n",
 			wantNodeCheck: true,
 		},
 		{
 			name:          "running but not ready",
 			list:          running,
 			ready:         false,
-			want:          "State: Running\nIP: 192.168.64.5\nK3s Node Status: NotReady\n",
+			want:          "  State:     Running\n  IP:        192.168.64.5\n  k3s node:  ✗ NotReady\n",
 			wantNodeCheck: true,
 		},
 		{
 			name:          "running but unreachable",
 			list:          running,
 			readyErr:      errors.New("no route to host"),
-			want:          "State: Running\nIP: 192.168.64.5\nK3s Node Status: unknown (no route to host)\n",
+			want:          "  State:     Running\n  IP:        192.168.64.5\n  k3s node:  ? unknown (no route to host)\n",
 			wantNodeCheck: true,
 		},
 		{
 			name: "stopped skips node check",
 			list: `{"list": [{"name": "homelab", "state": "Stopped", "ipv4": []}]}`,
-			want: "State: Stopped\nIP: none\nK3s Node Status: n/a\n",
+			want: "  State:     Stopped\n  IP:        none\n  k3s node:  - n/a\n",
 		},
 		{
 			name:    "missing",
@@ -397,7 +397,7 @@ func TestCreateLocalAcceptsManagedVM(t *testing.T) {
 	if err := createLocal(&buf, "mylab"); err != nil {
 		t.Fatalf("createLocal() error = %v", err)
 	}
-	if !strings.Contains(buf.String(), `vm "mylab" already exists, skipping launch`) {
+	if !strings.Contains(buf.String(), `• VM "mylab" already exists, skipping launch`) {
 		t.Errorf("output missing skip-launch message, got: %q", buf.String())
 	}
 	if *gotArgs != nil {
@@ -472,7 +472,7 @@ func TestDestroyLocalManagedVM(t *testing.T) {
 	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("env dir still exists after destroy (stat err = %v)", err)
 	}
-	if !strings.Contains(buf.String(), "vm \"mylab\" deleted\n") {
+	if !strings.Contains(buf.String(), "✓ VM \"mylab\" deleted\n") {
 		t.Errorf("output missing delete message, got: %q", buf.String())
 	}
 }

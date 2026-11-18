@@ -112,7 +112,7 @@ func newStatusCommand() *cobra.Command {
 			if err := validateProviderFlag(provider); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Retrieving Homelab Status...\nName: %s\nProvider: %s\n", name, provider)
+			fmt.Fprintf(cmd.OutOrStdout(), "→ Checking homelab %q...\n  Name:      %s\n  Provider:  %s\n", name, name, provider)
 
 			switch provider {
 			case "aws":
@@ -151,7 +151,7 @@ func newDestroyCommand() *cobra.Command {
 					return err
 				}
 				if !confirmed {
-					fmt.Fprintln(cmd.OutOrStdout(), "destroy aborted")
+					fmt.Fprintln(cmd.OutOrStdout(), "• Destroy aborted, nothing was changed")
 					return nil
 				}
 			}
@@ -195,7 +195,7 @@ func validateNameFlag(name string) error {
 }
 
 func createHeader(provider string, nodes int, name string) string {
-	return fmt.Sprintf("Creating a new homelab environment: %s\nProvider: %s\nNodes: %d\n", name, provider, nodes)
+	return fmt.Sprintf("→ Creating homelab %q...\n  Name:      %s\n  Provider:  %s\n  Nodes:     %d\n", name, name, provider, nodes)
 }
 
 func envDir(name string) (string, error) {
@@ -251,7 +251,7 @@ func loadState(dir string) (HomelabState, error) {
 }
 
 func confirmDestroy(r io.Reader, w io.Writer, name string) (bool, error) {
-	fmt.Fprintf(w, "Destroy homelab %q? This cannot be undone. [y/N]: ", name)
+	fmt.Fprintf(w, "⚠ Destroy homelab %q? This cannot be undone. [y/N]: ", name)
 	input, err := bufio.NewReader(r).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err
@@ -267,7 +267,7 @@ func confirmDestroy(r io.Reader, w io.Writer, name string) (bool, error) {
 func main() {
 	rootCmd := newRootCommand()
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintf(os.Stderr, "✗ Error: %v\n", err)
 		os.Exit(1)
 	}
 }
