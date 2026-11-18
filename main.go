@@ -30,7 +30,7 @@ type HomelabState struct {
 
 func getVersion() string {
 	if version == "" {
-		version = "0.1.0"
+		return "Homelab dev"
 	}
 	return "Homelab v" + version
 }
