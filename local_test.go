@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubLaunch replaces launch with a fake that records its args and returns err,
@@ -333,5 +337,218 @@ func TestStatusLocal(t *testing.T) {
 				t.Errorf("node readiness checked = %v, want %v", *called, tt.wantNodeCheck)
 			}
 		})
+	}
+}
+
+// stubCreateSteps stubs every multipass step after the existence check so
+// createLocal can run end to end. It returns the fake HOME and the launch args.
+func stubCreateSteps(t *testing.T, name, list string) (string, *[]string) {
+	t.Helper()
+	stubListInstances(t, list, nil)
+	gotArgs := stubLaunch(t, nil)
+	stubVerify(t, nil)
+	stubVerifyK3s(t, true, nil)
+	stubInstallK3s(t, nil)
+	home := stubKubeconfigSteps(t, name)
+	return home, gotArgs
+}
+
+func TestCreateLocalSavesState(t *testing.T) {
+	home, _ := stubCreateSteps(t, "mylab", `{"list": []}`)
+
+	before := time.Now()
+	if err := createLocal(io.Discard, "mylab"); err != nil {
+		t.Fatalf("createLocal() error = %v", err)
+	}
+
+	got, err := loadState(filepath.Join(home, ".homelab", "mylab"))
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if got.Name != "mylab" || got.Provider != "local" {
+		t.Errorf("state = %+v, want name %q and provider %q", got, "mylab", "local")
+	}
+	if got.CreatedAt.Before(before) {
+		t.Errorf("state CreatedAt = %v, want at or after %v", got.CreatedAt, before)
+	}
+}
+
+func TestCreateLocalRejectsUnmanagedVM(t *testing.T) {
+	// A VM with this name exists, but homelab-builder never wrote state for it.
+	_, gotArgs := stubCreateSteps(t, "mylab", `{"list": [{"name": "mylab", "state": "Running"}]}`)
+
+	err := createLocal(io.Discard, "mylab")
+	if err == nil || !strings.Contains(err.Error(), "not created by homelab-builder") {
+		t.Fatalf("createLocal() error = %v, want unmanaged VM error", err)
+	}
+	if *gotArgs != nil {
+		t.Errorf("launch called with %v, want no launch", *gotArgs)
+	}
+}
+
+func TestCreateLocalAcceptsManagedVM(t *testing.T) {
+	home, gotArgs := stubCreateSteps(t, "mylab", `{"list": [{"name": "mylab", "state": "Running"}]}`)
+	dir := filepath.Join(home, ".homelab", "mylab")
+	if err := saveState(dir, HomelabState{Name: "mylab", Provider: "local", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("saveState() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := createLocal(&buf, "mylab"); err != nil {
+		t.Fatalf("createLocal() error = %v", err)
+	}
+	if !strings.Contains(buf.String(), `vm "mylab" already exists, skipping launch`) {
+		t.Errorf("output missing skip-launch message, got: %q", buf.String())
+	}
+	if *gotArgs != nil {
+		t.Errorf("launch called with %v, want no launch", *gotArgs)
+	}
+}
+
+func TestCreateLocalCorruptState(t *testing.T) {
+	// A corrupt state file must stop create, not be treated as managed.
+	home, _ := stubCreateSteps(t, "mylab", `{"list": [{"name": "mylab", "state": "Running"}]}`)
+	gotVerify := stubVerify(t, nil)
+	dir := filepath.Join(home, ".homelab", "mylab")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := createLocal(io.Discard, "mylab")
+	if err == nil || !strings.Contains(err.Error(), "parsing homelab state") {
+		t.Fatalf("createLocal() error = %v, want state parse error", err)
+	}
+	if *gotVerify != "" {
+		t.Errorf("verify called with %q, want create to stop before verify", *gotVerify)
+	}
+}
+
+// stubDeleteVM replaces deleteVM with a fake that records the VM name and
+// returns err, so tests never delete a real VM.
+func stubDeleteVM(t *testing.T, err error) *string {
+	t.Helper()
+	var gotName string
+	orig := deleteVM
+	deleteVM = func(vm string) error {
+		gotName = vm
+		return err
+	}
+	t.Cleanup(func() { deleteVM = orig })
+	return &gotName
+}
+
+// setupDestroy fakes HOME and the multipass list, and optionally writes a state
+// file for "mylab". It returns the env dir.
+func setupDestroy(t *testing.T, list string, withState bool) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stubListInstances(t, list, nil)
+	dir := filepath.Join(home, ".homelab", "mylab")
+	if withState {
+		if err := saveState(dir, HomelabState{Name: "mylab", Provider: "local", CreatedAt: time.Now()}); err != nil {
+			t.Fatalf("saveState() error = %v", err)
+		}
+	}
+	return dir
+}
+
+const listWithMylab = `{"list": [{"name": "mylab", "state": "Stopped"}]}`
+
+func TestDestroyLocalManagedVM(t *testing.T) {
+	dir := setupDestroy(t, listWithMylab, true)
+	gotDelete := stubDeleteVM(t, nil)
+
+	var buf bytes.Buffer
+	if err := destroyLocal(&buf, "mylab"); err != nil {
+		t.Fatalf("destroyLocal() error = %v", err)
+	}
+	if *gotDelete != "mylab" {
+		t.Errorf("deleteVM called with %q, want %q", *gotDelete, "mylab")
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("env dir still exists after destroy (stat err = %v)", err)
+	}
+	if !strings.Contains(buf.String(), "vm \"mylab\" deleted\n") {
+		t.Errorf("output missing delete message, got: %q", buf.String())
+	}
+}
+
+func TestDestroyLocalRejectsUnmanagedVM(t *testing.T) {
+	setupDestroy(t, listWithMylab, false)
+	gotDelete := stubDeleteVM(t, nil)
+
+	err := destroyLocal(io.Discard, "mylab")
+	if err == nil || !strings.Contains(err.Error(), "not created by homelab-builder") {
+		t.Fatalf("destroyLocal() error = %v, want unmanaged VM error", err)
+	}
+	if *gotDelete != "" {
+		t.Errorf("deleteVM called with %q on an unmanaged VM", *gotDelete)
+	}
+}
+
+func TestDestroyLocalVMAlreadyGone(t *testing.T) {
+	// State exists but the VM was deleted outside the tool: clean up local files.
+	dir := setupDestroy(t, `{"list": []}`, true)
+	gotDelete := stubDeleteVM(t, nil)
+
+	var buf bytes.Buffer
+	if err := destroyLocal(&buf, "mylab"); err != nil {
+		t.Fatalf("destroyLocal() error = %v", err)
+	}
+	if *gotDelete != "" {
+		t.Errorf("deleteVM called with %q, want no delete for a missing VM", *gotDelete)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("env dir still exists after destroy (stat err = %v)", err)
+	}
+	if !strings.Contains(buf.String(), "not found, cleaning up local files\n") {
+		t.Errorf("output missing cleanup warning, got: %q", buf.String())
+	}
+}
+
+func TestDestroyLocalNothingToDestroy(t *testing.T) {
+	setupDestroy(t, `{"list": []}`, false)
+	stubDeleteVM(t, nil)
+
+	err := destroyLocal(io.Discard, "mylab")
+	if err == nil || !strings.Contains(err.Error(), `homelab "mylab" not found`) {
+		t.Fatalf("destroyLocal() error = %v, want homelab not found", err)
+	}
+}
+
+func TestDestroyLocalDeleteFails(t *testing.T) {
+	// If the VM delete fails, the state file must survive so destroy can be retried.
+	dir := setupDestroy(t, listWithMylab, true)
+	stubDeleteVM(t, errors.New("multipass exploded"))
+
+	err := destroyLocal(io.Discard, "mylab")
+	if err == nil || !strings.Contains(err.Error(), "multipass exploded") {
+		t.Fatalf("destroyLocal() error = %v, want delete error", err)
+	}
+	if _, err := loadState(dir); err != nil {
+		t.Errorf("state file gone after failed delete: %v", err)
+	}
+}
+
+func TestDestroyLocalCorruptStateVMGone(t *testing.T) {
+	dir := setupDestroy(t, `{"list": []}`, false)
+	stubDeleteVM(t, nil)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := destroyLocal(io.Discard, "mylab")
+	if err == nil || !strings.Contains(err.Error(), "parsing homelab state") {
+		t.Fatalf("destroyLocal() error = %v, want state parse error", err)
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Errorf("env dir removed despite corrupt state: %v", statErr)
 	}
 }
