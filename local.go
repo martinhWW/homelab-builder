@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -20,73 +22,86 @@ var getKubeconfig = fetchKubeconfig
 var waitForNodeReadyCheck = waitForNodeReady
 var listInstances = checkMultipass
 var checkNodeReady = nodeReady
+var deleteVM = deleteInstance
 
 func createLocal(w io.Writer, name string) error {
+	// The Multipass instance name; same as the homelab name.
+	vm := name
 	// Check if Multipass is installed on the host machine
-	output, err := checkMultipass()
+	output, err := listInstances()
+	if err != nil {
+		return err
+	}
+
+	dir, err := envDir(name)
 	if err != nil {
 		return err
 	}
 
 	// Check if a Multipass VM instance exists with the provided name
-	exists, err := instanceExists(output, name)
+	exists, err := instanceExists(output, vm)
 	if err != nil {
 		return err
 	}
 	if exists {
-		fmt.Fprintf(w, "vm %q already exists, skipping launch\n", name)
+		err = checkManagedInstance(dir, vm)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "vm %q already exists, skipping launch\n", vm)
 	} else {
 		// Launch new Multipass VM instance
-		launchArgs := buildMultipassLaunchArgs(name)
+		launchArgs := buildMultipassLaunchArgs(vm)
 		fmt.Fprintf(w, "multipass %s\n", strings.Join(launchArgs, " "))
 		if err := launch(w, launchArgs); err != nil {
 			return err
 		}
+		err = saveState(dir, HomelabState{Name: name, Provider: "local", CreatedAt: time.Now()})
+		if err != nil {
+			return err
+		}
 	}
+
 	// Verify VM instance is reachable
-	if err := verify(name); err != nil {
+	if err := verify(vm); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "vm %q is ready\n", name)
+	fmt.Fprintf(w, "vm %q is ready\n", vm)
 
 	// Check if K3s is already installed on VM instance
-	installed, err := verifyK3s(name)
+	installed, err := verifyK3s(vm)
 	if err != nil {
 		return err
 	}
 	if installed {
-		fmt.Fprintf(w, "k3s is already installed on VM %q\n", name)
+		fmt.Fprintf(w, "k3s is already installed on VM %q\n", vm)
 	} else {
-		err = installK3s(w, name)
+		err = installK3s(w, vm)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "k3s has been installed on VM %q\n", name)
+		fmt.Fprintf(w, "k3s has been installed on VM %q\n", vm)
 	}
 
-	info, err := getVmInfo(name)
+	info, err := getVmInfo(vm)
 	if err != nil {
 		return err
 	}
-	ipString, err := parseVMIP(info, name)
+	ipString, err := parseVMIP(info, vm)
 	if err != nil {
 		return err
 	}
-	kubeconfig, err := getKubeconfig(name)
+	kubeconfig, err := getKubeconfig(vm)
 	if err != nil {
 		return err
 	}
 	editedKubeconfig := setKubeconfigServer(kubeconfig, ipString)
-	dir, err := environmentDir(name)
-	if err != nil {
-		return err
-	}
 	pathToKubeconfig, err := saveKubeconfig(dir, editedKubeconfig)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "waiting for node to be ready...")
-	err = waitForNodeReadyCheck(name)
+	err = waitForNodeReadyCheck(vm)
 	if err != nil {
 		return err
 	}
@@ -96,11 +111,13 @@ func createLocal(w io.Writer, name string) error {
 }
 
 func statusLocal(w io.Writer, name string) error {
+	// The Multipass instance name; same as the homelab name.
+	vm := name
 	output, err := listInstances()
 	if err != nil {
 		return err
 	}
-	instance, found, err := findInstance(output, name)
+	instance, found, err := findInstance(output, vm)
 	if err != nil {
 		return err
 	}
@@ -113,7 +130,7 @@ func statusLocal(w io.Writer, name string) error {
 	}
 	fmt.Fprintf(w, "State: %s\nIP: %s\n", instance.State, ip)
 	if instance.State == "Running" {
-		status, err := checkNodeReady(name)
+		status, err := checkNodeReady(vm)
 		if err != nil {
 			fmt.Fprintf(w, "K3s Node Status: unknown (%v)\n", err)
 			return nil
@@ -126,6 +143,47 @@ func statusLocal(w io.Writer, name string) error {
 	} else {
 		fmt.Fprintln(w, "K3s Node Status: n/a")
 	}
+	return nil
+}
+
+func destroyLocal(w io.Writer, name string) error {
+	vm := name
+	output, err := listInstances()
+	if err != nil {
+		return err
+	}
+	dir, err := envDir(name)
+	if err != nil {
+		return err
+	}
+	exists, err := instanceExists(output, vm)
+	if err != nil {
+		return err
+	}
+	if exists {
+		err = checkManagedInstance(dir, vm)
+		if err != nil {
+			return err
+		}
+		// Stop here if the delete fails: removing dir would orphan the VM.
+		if err := deleteVM(vm); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "vm %q deleted\n", vm)
+	} else {
+		_, err = loadState(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("homelab %q not found", name)
+		} else if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "vm %q not found, cleaning up local files\n", vm)
+	}
+	err = os.RemoveAll(dir)
+	if err != nil {
+		return fmt.Errorf("removing %q: %w", dir, err)
+	}
+	fmt.Fprintf(w, "removed %s\n", dir)
 	return nil
 }
 
@@ -157,6 +215,22 @@ func checkMultipass() ([]byte, error) {
 	return output, nil
 }
 
+func checkManagedInstance(dir, vm string) error {
+	_, err := loadState(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("vm %q exists but was not created by homelab-builder", vm)
+	}
+	return err
+}
+
+func deleteInstance(vm string) error {
+	_, err := runMultipass("delete", "--purge", vm)
+	if err != nil {
+		return fmt.Errorf("deleting VM %q: %w", vm, err)
+	}
+	return nil
+}
+
 func launchInstance(w io.Writer, args []string) error {
 	c := exec.Command("multipass", args...)
 	c.Stdout = w
@@ -167,19 +241,19 @@ func launchInstance(w io.Writer, args []string) error {
 	return nil
 }
 
-func verifyInstance(name string) error {
-	if _, err := runMultipass("exec", name, "--", "true"); err != nil {
-		return fmt.Errorf("connection to VM %q failed: %w", name, err)
+func verifyInstance(vm string) error {
+	if _, err := runMultipass("exec", vm, "--", "true"); err != nil {
+		return fmt.Errorf("connection to VM %q failed: %w", vm, err)
 	}
 	return nil
 }
 
-func buildMultipassLaunchArgs(name string) []string {
+func buildMultipassLaunchArgs(vm string) []string {
 	return []string{
 		"launch",
 		"24.04",
 		"--name",
-		name,
+		vm,
 		"--cpus",
 		"2",
 		"--memory",
@@ -189,25 +263,25 @@ func buildMultipassLaunchArgs(name string) []string {
 	}
 }
 
-func installK3sOnVm(w io.Writer, name string) error {
+func installK3sOnVm(w io.Writer, vm string) error {
 	downloadCmd := `curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh`
 	installCmd := `INSTALL_K3S_EXEC="server --disable traefik" sh /tmp/k3s-install.sh`
 
 	// Pass "sh", "-c", and the full command string as separate arguments to multipass exec
-	cmd := exec.Command("multipass", "exec", name, "--", "sh", "-c", downloadCmd+" && "+installCmd)
+	cmd := exec.Command("multipass", "exec", vm, "--", "sh", "-c", downloadCmd+" && "+installCmd)
 
 	cmd.Stdout = w
 	cmd.Stderr = w
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install k3s on %q: %w", name, err)
+		return fmt.Errorf("failed to install k3s on %q: %w", vm, err)
 	}
 
 	return nil
 }
 
-func verifyK3sExists(name string) (bool, error) {
-	_, err := runMultipass("exec", name, "--", "which", "k3s")
+func verifyK3sExists(vm string) (bool, error) {
+	_, err := runMultipass("exec", vm, "--", "which", "k3s")
 	if err == nil {
 		return true, nil
 	}
@@ -216,40 +290,40 @@ func verifyK3sExists(name string) (bool, error) {
 		return false, nil
 	}
 
-	return false, fmt.Errorf("checking for k3s on VM %q: %w", name, err)
+	return false, fmt.Errorf("checking for k3s on VM %q: %w", vm, err)
 }
 
-func instanceExists(data []byte, name string) (bool, error) {
-	_, found, err := findInstance(data, name)
+func instanceExists(data []byte, vm string) (bool, error) {
+	_, found, err := findInstance(data, vm)
 	return found, err
 }
 
 // findInstance looks up the named instance in `multipass list --format json` output.
-func findInstance(data []byte, name string) (MultipassInstance, bool, error) {
+func findInstance(data []byte, vm string) (MultipassInstance, bool, error) {
 	var list MultipassList
 	if err := json.Unmarshal(data, &list); err != nil {
 		return MultipassInstance{}, false, fmt.Errorf("parsing multipass list output: %w", err)
 	}
 	for _, instance := range list.Instances {
-		if instance.Name == name {
+		if instance.Name == vm {
 			return instance, true, nil
 		}
 	}
 	return MultipassInstance{}, false, nil
 }
 
-func fetchKubeconfig(name string) ([]byte, error) {
-	output, err := runMultipass("exec", name, "--", "sudo", "cat", "/etc/rancher/k3s/k3s.yaml")
+func fetchKubeconfig(vm string) ([]byte, error) {
+	output, err := runMultipass("exec", vm, "--", "sudo", "cat", "/etc/rancher/k3s/k3s.yaml")
 	if err != nil {
-		return nil, fmt.Errorf("reading kubeconfig from VM %q: %w", name, err)
+		return nil, fmt.Errorf("reading kubeconfig from VM %q: %w", vm, err)
 	}
 	return output, nil
 }
 
-func nodeReady(name string) (bool, error) {
-	output, err := runMultipass("exec", name, "--", "sudo", "k3s", "kubectl", "get", "nodes", "-o", `jsonpath={.items[*].status.conditions[?(@.type=="Ready")].status}`)
+func nodeReady(vm string) (bool, error) {
+	output, err := runMultipass("exec", vm, "--", "sudo", "k3s", "kubectl", "get", "nodes", "-o", `jsonpath={.items[*].status.conditions[?(@.type=="Ready")].status}`)
 	if err != nil {
-		return false, fmt.Errorf("checking node readiness on %q: %w", name, err)
+		return false, fmt.Errorf("checking node readiness on %q: %w", vm, err)
 	}
 	if strings.TrimSpace(string(output)) == "True" {
 		return true, nil
@@ -257,28 +331,28 @@ func nodeReady(name string) (bool, error) {
 	return false, nil
 }
 
-func nodeReadyCheck(name string) error {
-	if _, err := runMultipass("exec", name, "--", "sudo", "k3s", "kubectl", "wait", "--for=condition=Ready", "node", "--all", "--timeout=10s"); err != nil {
-		return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w", name, err)
+func nodeReadyCheck(vm string) error {
+	if _, err := runMultipass("exec", vm, "--", "sudo", "k3s", "kubectl", "wait", "--for=condition=Ready", "node", "--all", "--timeout=10s"); err != nil {
+		return fmt.Errorf("waiting for k3s node on VM %q to be ready: %w", vm, err)
 	}
 	return nil
 }
 
-func waitForNodeReady(name string) error {
+func waitForNodeReady(vm string) error {
 	attempts := 10
 	var err error
-	for i := 0; i < attempts; i++ {
-		err = nodeReadyCheck(name)
+	for range attempts {
+		err = nodeReadyCheck(vm)
 		if err == nil {
 			return nil
 		}
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("node on VM %q not ready after %d attempts: %w", name, attempts, err)
+	return fmt.Errorf("node on VM %q not ready after %d attempts: %w", vm, attempts, err)
 }
 
-func vmInfo(name string) ([]byte, error) {
-	output, err := runMultipass("info", name, "--format", "json")
+func vmInfo(vm string) ([]byte, error) {
+	output, err := runMultipass("info", vm, "--format", "json")
 	if err != nil {
 		return nil, fmt.Errorf("command 'multipass info' failed: %w", err)
 	}

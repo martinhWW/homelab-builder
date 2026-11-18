@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVersion(t *testing.T) {
@@ -37,6 +40,7 @@ func TestUnknownCommand(t *testing.T) {
 
 func TestCreate(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	gotName := stubVerify(t, nil)
 	gotCheckName := stubVerifyK3s(t, false, nil)
 	gotInstallName, _ := stubInstallK3s(t, nil)
@@ -82,6 +86,7 @@ func TestCreate(t *testing.T) {
 
 func TestCreateVerifyFails(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, errors.New("not reachable"))
 	rootCmd := newRootCommand()
 	var buf bytes.Buffer
@@ -98,6 +103,7 @@ func TestCreateVerifyFails(t *testing.T) {
 
 func TestCreateLaunchFails(t *testing.T) {
 	stubLaunch(t, errors.New("boom"))
+	stubListInstances(t, `{"list": []}`, nil)
 	rootCmd := newRootCommand()
 	rootCmd.SetOut(io.Discard)
 	rootCmd.SetArgs([]string{"create", "--name", "faillab"})
@@ -109,6 +115,7 @@ func TestCreateLaunchFails(t *testing.T) {
 
 func TestCreateWithName(t *testing.T) {
 	gotArgs := stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	gotName := stubVerify(t, nil)
 	stubVerifyK3s(t, false, nil)
 	gotInstallName, _ := stubInstallK3s(t, nil)
@@ -138,6 +145,7 @@ func TestCreateWithName(t *testing.T) {
 
 func TestCreateK3sAlreadyInstalled(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, nil)
 	stubVerifyK3s(t, true, nil)
 	_, called := stubInstallK3s(t, nil)
@@ -163,6 +171,7 @@ func TestCreateK3sAlreadyInstalled(t *testing.T) {
 
 func TestCreateVMInfoFails(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, nil)
 	stubVerifyK3s(t, true, nil)
 	stubInstallK3s(t, nil)
@@ -183,6 +192,7 @@ func TestCreateVMInfoFails(t *testing.T) {
 
 func TestCreateGetKubeconfigFails(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, nil)
 	stubVerifyK3s(t, true, nil)
 	stubInstallK3s(t, nil)
@@ -202,6 +212,7 @@ func TestCreateGetKubeconfigFails(t *testing.T) {
 
 func TestCreateK3sCheckFails(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, nil)
 	stubVerifyK3s(t, false, errors.New("check broke"))
 	_, called := stubInstallK3s(t, nil)
@@ -219,6 +230,7 @@ func TestCreateK3sCheckFails(t *testing.T) {
 
 func TestCreateK3sInstallFails(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, nil)
 	stubVerifyK3s(t, false, nil)
 	stubInstallK3s(t, errors.New("install broke"))
@@ -359,22 +371,22 @@ func TestCreateHeader(t *testing.T) {
 	}
 }
 
-func TestEnvironmentDir(t *testing.T) {
+func TestEnvDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	got, err := environmentDir("mylab")
+	got, err := envDir("mylab")
 	if err != nil {
-		t.Fatalf("environmentDir() error = %v", err)
+		t.Fatalf("envDir() error = %v", err)
 	}
 	want := filepath.Join(home, ".homelab", "mylab")
 	if got != want {
-		t.Errorf("environmentDir() = %q, want %q", got, want)
+		t.Errorf("envDir() = %q, want %q", got, want)
 	}
 }
 
-func TestEnvironmentDirNoHome(t *testing.T) {
+func TestEnvDirNoHome(t *testing.T) {
 	t.Setenv("HOME", "")
-	_, err := environmentDir("mylab")
+	_, err := envDir("mylab")
 	if err == nil || !strings.Contains(err.Error(), "finding home directory") {
 		t.Fatalf("Expected home directory error, got: %v", err)
 	}
@@ -438,6 +450,7 @@ func TestSaveKubeconfigExistingDir(t *testing.T) {
 
 func TestCreateNodeNotReady(t *testing.T) {
 	stubLaunch(t, nil)
+	stubListInstances(t, `{"list": []}`, nil)
 	stubVerify(t, nil)
 	stubVerifyK3s(t, true, nil)
 	stubInstallK3s(t, nil)
@@ -457,5 +470,196 @@ func TestCreateNodeNotReady(t *testing.T) {
 	// The kubeconfig is saved before waiting, so it's there for debugging.
 	if _, err := os.Stat(filepath.Join(home, ".homelab", "k3slab", "kubeconfig")); err != nil {
 		t.Errorf("Expected kubeconfig to be saved even when the node is not ready: %v", err)
+	}
+}
+
+func TestSaveState(t *testing.T) {
+	// Nested path: state is written right after launch, before saveKubeconfig
+	// has created the environment directory.
+	dir := filepath.Join(t.TempDir(), ".homelab", "mylab")
+	want := HomelabState{
+		Name:      "mylab",
+		Provider:  "local",
+		CreatedAt: time.Date(2026, 11, 18, 10, 30, 0, 0, time.UTC),
+	}
+
+	if err := saveState(dir, want); err != nil {
+		t.Fatalf("saveState() error = %v", err)
+	}
+
+	path := filepath.Join(dir, "state.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat state.json: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("state.json permissions = %o, want 600", perm)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	var got HomelabState
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("state.json is not valid JSON: %v", err)
+	}
+	if got.Name != want.Name || got.Provider != want.Provider || !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Errorf("state = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadState(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "mylab")
+	want := HomelabState{
+		Name:      "mylab",
+		Provider:  "local",
+		CreatedAt: time.Date(2026, 11, 18, 10, 30, 0, 0, time.UTC),
+	}
+	if err := saveState(dir, want); err != nil {
+		t.Fatalf("saveState() error = %v", err)
+	}
+
+	got, err := loadState(dir)
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if got.Name != want.Name || got.Provider != want.Provider || !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Errorf("loadState() = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadStateMissing(t *testing.T) {
+	// destroy relies on this to tell "unmanaged" apart from other failures.
+	_, err := loadState(t.TempDir())
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("loadState() error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestLoadStateCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+
+	_, err := loadState(dir)
+	if err == nil {
+		t.Fatal("loadState() error = nil, want error for corrupt file")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("loadState() error = %v, corrupt file must not look like a missing file", err)
+	}
+}
+
+func TestConfirmDestroy(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"y", "y\n", true},
+		{"yes", "yes\n", true},
+		{"uppercase with spaces", "  YES \n", true},
+		{"n", "n\n", false},
+		{"empty line defaults to no", "\n", false},
+		{"other word", "nope\n", false},
+		{"y without newline", "y", true},
+		{"no input at all", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := confirmDestroy(strings.NewReader(tt.input), &out, "mylab")
+			if err != nil {
+				t.Fatalf("confirmDestroy() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("confirmDestroy(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			if !strings.Contains(out.String(), "mylab") {
+				t.Errorf("prompt %q does not name the homelab", out.String())
+			}
+		})
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+func TestConfirmDestroyReadError(t *testing.T) {
+	got, err := confirmDestroy(errReader{}, io.Discard, "mylab")
+	if err == nil {
+		t.Fatal("confirmDestroy() error = nil, want read error")
+	}
+	if got {
+		t.Error("confirmDestroy() = true on read error, want false")
+	}
+}
+
+func runDestroy(t *testing.T, input string, args ...string) (string, error) {
+	t.Helper()
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetIn(strings.NewReader(input))
+	rootCmd.SetArgs(append([]string{"destroy", "--name", "mylab"}, args...))
+	err := rootCmd.Execute()
+	return buf.String(), err
+}
+
+func TestDestroyPromptsAndAborts(t *testing.T) {
+	dir := setupDestroy(t, listWithMylab, true)
+	gotDelete := stubDeleteVM(t, nil)
+
+	out, err := runDestroy(t, "n\n")
+	if err != nil {
+		t.Fatalf("destroy error = %v", err)
+	}
+	if !strings.Contains(out, "[y/N]") {
+		t.Errorf("expected a confirmation prompt, got: %q", out)
+	}
+	if !strings.Contains(out, "aborted") {
+		t.Errorf("expected an aborted message, got: %q", out)
+	}
+	if *gotDelete != "" {
+		t.Errorf("deleteVM called with %q after the user said no", *gotDelete)
+	}
+	if _, err := loadState(dir); err != nil {
+		t.Errorf("state removed after abort: %v", err)
+	}
+}
+
+func TestDestroyPromptsAndConfirms(t *testing.T) {
+	setupDestroy(t, listWithMylab, true)
+	gotDelete := stubDeleteVM(t, nil)
+
+	out, err := runDestroy(t, "y\n")
+	if err != nil {
+		t.Fatalf("destroy error = %v", err)
+	}
+	if !strings.Contains(out, "[y/N]") {
+		t.Errorf("expected a confirmation prompt, got: %q", out)
+	}
+	if *gotDelete != "mylab" {
+		t.Errorf("deleteVM called with %q, want %q", *gotDelete, "mylab")
+	}
+}
+
+func TestDestroyForceSkipsPrompt(t *testing.T) {
+	setupDestroy(t, listWithMylab, true)
+	gotDelete := stubDeleteVM(t, nil)
+
+	// No input: with --force, destroy must not wait for an answer.
+	out, err := runDestroy(t, "", "--force")
+	if err != nil {
+		t.Fatalf("destroy --force error = %v", err)
+	}
+	if strings.Contains(out, "[y/N]") {
+		t.Errorf("--force should skip the prompt, got: %q", out)
+	}
+	if *gotDelete != "mylab" {
+		t.Errorf("deleteVM called with %q, want %q", *gotDelete, "mylab")
 	}
 }

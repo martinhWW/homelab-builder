@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -15,6 +21,12 @@ var version string
 // with a lowercase letter, ends with a lowercase letter or digit, only lowercase
 // letters, digits, and hyphens in between, at most 63 characters.
 var validName = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+type HomelabState struct {
+	Name      string    `json:"name"`
+	Provider  string    `json:"provider"`
+	CreatedAt time.Time `json:"createdAt"`
+}
 
 func getVersion() string {
 	if version == "" {
@@ -46,19 +58,20 @@ func newRootCommand() *cobra.Command {
 	)
 	rootCmd.AddCommand(newCreateCommand())
 	rootCmd.AddCommand(newStatusCommand())
+	rootCmd.AddCommand(newDestroyCommand())
 	return rootCmd
 }
 
 func newCreateCommand() *cobra.Command {
 	var provider string
 	var numNodes int
-	var environmentName string
+	var envName string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a new homelab environment",
 		Long:  "Create a new homelab environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateNameFlag(environmentName); err != nil {
+			if err := validateNameFlag(envName); err != nil {
 				return err
 			}
 			if err := validateProviderFlag(provider); err != nil {
@@ -68,20 +81,20 @@ func newCreateCommand() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprint(cmd.OutOrStdout(), createHeader(provider, numNodes, environmentName))
+			fmt.Fprint(cmd.OutOrStdout(), createHeader(provider, numNodes, envName))
 
 			switch provider {
 			case "aws":
 			case "gcp":
 			case "local":
-				return createLocal(cmd.OutOrStdout(), environmentName)
+				return createLocal(cmd.OutOrStdout(), envName)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&provider, "provider", "p", "local", "The provider to use for the homelab environment (aws, gcp, local)")
 	cmd.Flags().IntVarP(&numNodes, "nodes", "n", 1, "The number of nodes to create for the homelab environment")
-	cmd.Flags().StringVar(&environmentName, "name", "homelab", "The name of the lab environment")
+	cmd.Flags().StringVar(&envName, "name", "homelab", "The name of the lab environment")
 	return cmd
 }
 
@@ -116,6 +129,49 @@ func newStatusCommand() *cobra.Command {
 	return cmd
 }
 
+func newDestroyCommand() *cobra.Command {
+	var provider string
+	var name string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "destroy",
+		Short: "Destroy a homelab environment",
+		Long:  "Destroy a homelab environment: delete its VM and remove its local files, including the kubeconfig",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateNameFlag(name); err != nil {
+				return err
+			}
+			if err := validateProviderFlag(provider); err != nil {
+				return err
+			}
+
+			if !force {
+				confirmed, err := confirmDestroy(cmd.InOrStdin(), cmd.OutOrStdout(), name)
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					fmt.Fprintln(cmd.OutOrStdout(), "destroy aborted")
+					return nil
+				}
+			}
+
+			switch provider {
+			case "aws":
+			case "gcp":
+			case "local":
+				return destroyLocal(cmd.OutOrStdout(), name)
+			}
+
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&provider, "provider", "p", "local", "The provider to use for the homelab environment (aws, gcp, local)")
+	cmd.Flags().StringVar(&name, "name", "homelab", "The name of the lab environment")
+	cmd.Flags().BoolVar(&force, "force", false, "Skip the confirmation prompt")
+	return cmd
+}
+
 func validateProviderFlag(provider string) error {
 	if provider != "local" && provider != "aws" && provider != "gcp" {
 		return fmt.Errorf("invalid provider: %s: must be aws, gcp, or local", provider)
@@ -142,7 +198,7 @@ func createHeader(provider string, nodes int, name string) string {
 	return fmt.Sprintf("Creating a new homelab environment: %s\nProvider: %s\nNodes: %d\n", name, provider, nodes)
 }
 
-func environmentDir(name string) (string, error) {
+func envDir(name string) (string, error) {
 	homepath, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("finding home directory: %w", err)
@@ -161,6 +217,51 @@ func saveKubeconfig(dir string, data []byte) (string, error) {
 		return "", fmt.Errorf("writing kubeconfig: %w", err)
 	}
 	return pathToFile, nil
+}
+
+func saveState(dir string, s HomelabState) error {
+	err := os.MkdirAll(dir, 0700)
+	if err != nil {
+		return fmt.Errorf("creating environment directory: %w", err)
+	}
+	stateJSON, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding homelab state: %w", err)
+	}
+	pathToFile := filepath.Join(dir, "state.json")
+	err = os.WriteFile(pathToFile, stateJSON, 0600)
+	if err != nil {
+		return fmt.Errorf("writing homelab state: %w", err)
+	}
+	return nil
+}
+
+func loadState(dir string) (HomelabState, error) {
+	var homelabState HomelabState
+	pathToFile := filepath.Join(dir, "state.json")
+	contents, err := os.ReadFile(pathToFile)
+	if err != nil {
+		return HomelabState{}, fmt.Errorf("reading homelab state: %w", err)
+	}
+	if err = json.Unmarshal(contents, &homelabState); err != nil {
+		return HomelabState{}, fmt.Errorf("parsing homelab state: %w", err)
+	}
+	return homelabState, nil
+
+}
+
+func confirmDestroy(r io.Reader, w io.Writer, name string) (bool, error) {
+	fmt.Fprintf(w, "Destroy homelab %q? This cannot be undone. [y/N]: ", name)
+	input, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	input = strings.TrimSpace(input)
+	input = strings.ToLower(input)
+	if input == "y" || input == "yes" {
+		return true, nil
+	}
+	return false, nil
 }
 
 func main() {
