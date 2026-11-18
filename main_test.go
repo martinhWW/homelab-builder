@@ -16,16 +16,31 @@ import (
 )
 
 func TestVersion(t *testing.T) {
-	rootCmd := newRootCommand()
-	var buf bytes.Buffer
-	rootCmd.SetOut(&buf)
-	rootCmd.SetArgs([]string{"version"})
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("Error executing command: %v", err)
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{name: "unset", version: "", want: "Homelab dev\n"},
+		{name: "release", version: "0.1.0", want: "Homelab v0.1.0\n"},
 	}
-	if buf.String() != "Homelab v0.1.0\n" {
-		t.Errorf("Expected output: %q, got: %q", "Homelab v0.1.0\n", buf.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := version
+			version = tt.version
+			t.Cleanup(func() { version = orig })
+
+			rootCmd := newRootCommand()
+			var buf bytes.Buffer
+			rootCmd.SetOut(&buf)
+			rootCmd.SetArgs([]string{"version"})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("Error executing command: %v", err)
+			}
+			if buf.String() != tt.want {
+				t.Errorf("Expected output: %q, got: %q", tt.want, buf.String())
+			}
+		})
 	}
 }
 

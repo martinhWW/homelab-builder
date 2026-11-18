@@ -3,3 +3,6 @@
 
 # Local Claude Code instructions
 CLAUDE.md
+
+# Dir GoReleaser uses to write all its build output
+dist/
