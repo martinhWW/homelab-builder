@@ -48,11 +48,12 @@ func createLocal(w io.Writer, name string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "vm %q already exists, skipping launch\n", vm)
+		fmt.Fprintf(w, "• VM %q already exists, skipping launch\n", vm)
 	} else {
 		// Launch new Multipass VM instance
 		launchArgs := buildMultipassLaunchArgs(vm)
-		fmt.Fprintf(w, "multipass %s\n", strings.Join(launchArgs, " "))
+		fmt.Fprintf(w, "→ Launching VM %q...\n", vm)
+		fmt.Fprintf(w, "  multipass %s\n", strings.Join(launchArgs, " "))
 		if err := launch(w, launchArgs); err != nil {
 			return err
 		}
@@ -66,7 +67,7 @@ func createLocal(w io.Writer, name string) error {
 	if err := verify(vm); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "vm %q is ready\n", vm)
+	fmt.Fprintf(w, "✓ VM %q is up and reachable\n", vm)
 
 	// Check if K3s is already installed on VM instance
 	installed, err := verifyK3s(vm)
@@ -74,13 +75,14 @@ func createLocal(w io.Writer, name string) error {
 		return err
 	}
 	if installed {
-		fmt.Fprintf(w, "k3s is already installed on VM %q\n", vm)
+		fmt.Fprintln(w, "• k3s already installed, skipping")
 	} else {
+		fmt.Fprintln(w, "→ Installing k3s...")
 		err = installK3s(w, vm)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "k3s has been installed on VM %q\n", vm)
+		fmt.Fprintln(w, "✓ k3s installed")
 	}
 
 	info, err := getVmInfo(vm)
@@ -100,12 +102,14 @@ func createLocal(w io.Writer, name string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(w, "waiting for node to be ready...")
+	fmt.Fprintln(w, "→ Waiting for node to be ready...")
 	err = waitForNodeReadyCheck(vm)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "connect to k3s cluster using kubeconfig: export KUBECONFIG=%q\n", pathToKubeconfig)
+	fmt.Fprintf(w, "🚀 Homelab %q is ready!\n", name)
+	fmt.Fprintln(w, "  Connect with:")
+	fmt.Fprintf(w, "  export KUBECONFIG=%q\n", pathToKubeconfig)
 
 	return nil
 }
@@ -128,20 +132,20 @@ func statusLocal(w io.Writer, name string) error {
 	if len(instance.IPv4) > 0 {
 		ip = instance.IPv4[0]
 	}
-	fmt.Fprintf(w, "State: %s\nIP: %s\n", instance.State, ip)
+	fmt.Fprintf(w, "  State:     %s\n  IP:        %s\n", instance.State, ip)
 	if instance.State == "Running" {
 		status, err := checkNodeReady(vm)
 		if err != nil {
-			fmt.Fprintf(w, "K3s Node Status: unknown (%v)\n", err)
+			fmt.Fprintf(w, "  k3s node:  ? unknown (%v)\n", err)
 			return nil
 		}
 		if status {
-			fmt.Fprintln(w, "K3s Node Status: Ready")
+			fmt.Fprintln(w, "  k3s node:  ✓ Ready")
 		} else {
-			fmt.Fprintln(w, "K3s Node Status: NotReady")
+			fmt.Fprintln(w, "  k3s node:  ✗ NotReady")
 		}
 	} else {
-		fmt.Fprintln(w, "K3s Node Status: n/a")
+		fmt.Fprintln(w, "  k3s node:  - n/a")
 	}
 	return nil
 }
@@ -169,7 +173,7 @@ func destroyLocal(w io.Writer, name string) error {
 		if err := deleteVM(vm); err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "vm %q deleted\n", vm)
+		fmt.Fprintf(w, "✓ VM %q deleted\n", vm)
 	} else {
 		_, err = loadState(dir)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -177,13 +181,14 @@ func destroyLocal(w io.Writer, name string) error {
 		} else if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "vm %q not found, cleaning up local files\n", vm)
+		fmt.Fprintf(w, "• VM %q not found, cleaning up local files\n", vm)
 	}
 	err = os.RemoveAll(dir)
 	if err != nil {
 		return fmt.Errorf("removing %q: %w", dir, err)
 	}
-	fmt.Fprintf(w, "removed %s\n", dir)
+	fmt.Fprintf(w, "✓ Removed %s\n", dir)
+	fmt.Fprintf(w, "🧹 Homelab %q destroyed\n", name)
 	return nil
 }
 
