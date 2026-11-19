@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -25,6 +27,7 @@ var validName = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
 type HomelabState struct {
 	Name      string    `json:"name"`
 	Provider  string    `json:"provider"`
+	Nodes     int       `json:"nodes"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -59,6 +62,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd.AddCommand(newCreateCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newDestroyCommand())
+	rootCmd.AddCommand(newListCommand())
 	return rootCmd
 }
 
@@ -172,6 +176,48 @@ func newDestroyCommand() *cobra.Command {
 	return cmd
 }
 
+func newListCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all existing homelab environments",
+		Long:  "Returns a list of all existing homelab environments regardless of state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+
+			currentStateList, err := listStates()
+			if err != nil {
+				return err
+			}
+			if len(currentStateList) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "• No homelabs found")
+				return nil
+			}
+
+			instancesList, err := listInstances()
+			if err != nil {
+				return err
+			}
+
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tPROVIDER\tSTATE\tNODES")
+
+			for _, val := range currentStateList {
+				instance, found, err := findInstance(instancesList, val.Name)
+				if err != nil {
+					return err
+				}
+				state := "Not found"
+
+				if found {
+					state = instance.State
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", val.Name, val.Provider, state, val.Nodes)
+			}
+			return tw.Flush()
+		},
+	}
+	return cmd
+}
+
 func validateProviderFlag(provider string) error {
 	if provider != "local" && provider != "aws" && provider != "gcp" {
 		return fmt.Errorf("invalid provider: %s: must be aws, gcp, or local", provider)
@@ -199,11 +245,11 @@ func createHeader(provider string, nodes int, name string) string {
 }
 
 func envDir(name string) (string, error) {
-	homepath, err := os.UserHomeDir()
+	homelabPath, err := buildHomelabRootDir()
 	if err != nil {
-		return "", fmt.Errorf("finding home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(homepath, ".homelab", name), nil
+	return filepath.Join(homelabPath, name), nil
 }
 
 func saveKubeconfig(dir string, data []byte) (string, error) {
@@ -262,6 +308,48 @@ func confirmDestroy(r io.Reader, w io.Writer, name string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func listStates() ([]HomelabState, error) {
+	homelabPath, err := buildHomelabRootDir()
+	if err != nil {
+		return nil, err
+	}
+
+	dir, err := os.ReadDir(homelabPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading .homelab directory: %w", err)
+	}
+
+	var currentStateList []HomelabState
+	for _, lab := range dir {
+		if !lab.IsDir() {
+			continue
+		}
+		labDir := filepath.Join(homelabPath, lab.Name())
+		state, err := loadState(labDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		currentStateList = append(currentStateList, state)
+
+	}
+	return currentStateList, nil
+}
+
+func buildHomelabRootDir() (string, error) {
+	userHomepath, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding home directory: %w", err)
+	}
+	homelabPath := filepath.Join(userHomepath, ".homelab")
+	return homelabPath, nil
+
 }
 
 func main() {

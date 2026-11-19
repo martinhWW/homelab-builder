@@ -57,7 +57,7 @@ func createLocal(w io.Writer, name string) error {
 		if err := launch(w, launchArgs); err != nil {
 			return err
 		}
-		err = saveState(dir, HomelabState{Name: name, Provider: "local", CreatedAt: time.Now()})
+		err = saveState(dir, HomelabState{Name: name, Provider: "local", Nodes: 1, CreatedAt: time.Now()})
 		if err != nil {
 			return err
 		}

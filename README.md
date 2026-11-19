@@ -76,6 +76,24 @@ homelab status
 
 Shows the VM state and whether the k3s node is ready.
 
+### List homelabs
+
+```sh
+homelab list
+```
+
+Lists every homelab that `homelab` created, with its provider, VM state, and
+node count:
+
+```
+NAME     PROVIDER  STATE      NODES
+dev      local     Running    1
+staging  local     Stopped    1
+```
+
+A homelab whose VM was deleted outside of `homelab` shows `Not found`. Other
+Multipass VMs are never listed. `list` is read-only.
+
 ### Destroy a homelab
 
 ```sh
@@ -93,4 +111,5 @@ Each homelab has a directory at `~/.homelab/<name>/` containing:
 - `kubeconfig`: credentials for the cluster (treat as sensitive)
 
 `create` and `destroy` refuse to touch a Multipass VM that has no state file,
-so `homelab` never modifies VMs it didn't create.
+so `homelab` never modifies VMs it didn't create. `list` finds homelabs by
+their state files for the same reason.
