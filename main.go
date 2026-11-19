@@ -17,6 +17,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// ======================================================================
+// Globals and types
+//
+// Build-time version, name validation, and the per-homelab state record.
+// ======================================================================
+
 var version string
 
 // validName matches a name every provider accepts (Multipass, AWS, GCP): starts
@@ -31,12 +37,25 @@ type HomelabState struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-func getVersion() string {
-	if version == "" {
-		return "Homelab dev"
+// ======================================================================
+// Entry point
+//
+// Runs the root command and prints any error.
+// ======================================================================
+
+func main() {
+	rootCmd := newRootCommand()
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Error: %v\n", err)
+		os.Exit(1)
 	}
-	return "Homelab v" + version
 }
+
+// ======================================================================
+// Commands
+//
+// Cobra command definitions: root, version, create, status, list, destroy.
+// ======================================================================
 
 func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
@@ -64,6 +83,13 @@ func newRootCommand() *cobra.Command {
 	rootCmd.AddCommand(newDestroyCommand())
 	rootCmd.AddCommand(newListCommand())
 	return rootCmd
+}
+
+func getVersion() string {
+	if version == "" {
+		return "Homelab dev"
+	}
+	return "Homelab v" + version
 }
 
 func newCreateCommand() *cobra.Command {
@@ -133,6 +159,48 @@ func newStatusCommand() *cobra.Command {
 	return cmd
 }
 
+func newListCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all existing homelab environments",
+		Long:  "Returns a list of all existing homelab environments regardless of state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+
+			currentStateList, err := listStates()
+			if err != nil {
+				return err
+			}
+			if len(currentStateList) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "• No homelabs found")
+				return nil
+			}
+
+			instancesList, err := listInstances()
+			if err != nil {
+				return err
+			}
+
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tPROVIDER\tSTATE\tNODES")
+
+			for _, val := range currentStateList {
+				instance, found, err := findInstance(instancesList, val.Name)
+				if err != nil {
+					return err
+				}
+				state := "Not found"
+
+				if found {
+					state = instance.State
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", val.Name, val.Provider, state, val.Nodes)
+			}
+			return tw.Flush()
+		},
+	}
+	return cmd
+}
+
 func newDestroyCommand() *cobra.Command {
 	var provider string
 	var name string
@@ -176,46 +244,17 @@ func newDestroyCommand() *cobra.Command {
 	return cmd
 }
 
-func newListCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all existing homelab environments",
-		Long:  "Returns a list of all existing homelab environments regardless of state",
-		RunE: func(cmd *cobra.Command, args []string) error {
+// ======================================================================
+// Flag validation
+//
+// Checks user-supplied flags before any provider work runs.
+// ======================================================================
 
-			currentStateList, err := listStates()
-			if err != nil {
-				return err
-			}
-			if len(currentStateList) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "• No homelabs found")
-				return nil
-			}
-
-			instancesList, err := listInstances()
-			if err != nil {
-				return err
-			}
-
-			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tPROVIDER\tSTATE\tNODES")
-
-			for _, val := range currentStateList {
-				instance, found, err := findInstance(instancesList, val.Name)
-				if err != nil {
-					return err
-				}
-				state := "Not found"
-
-				if found {
-					state = instance.State
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", val.Name, val.Provider, state, val.Nodes)
-			}
-			return tw.Flush()
-		},
+func validateNameFlag(name string) error {
+	if !validName.MatchString(name) {
+		return fmt.Errorf("invalid name: %q: must start with a lowercase letter, end with a lowercase letter or digit, contain only lowercase letters, digits, or hyphens, and be at most 63 characters", name)
 	}
-	return cmd
+	return nil
 }
 
 func validateProviderFlag(provider string) error {
@@ -227,73 +266,22 @@ func validateProviderFlag(provider string) error {
 	}
 	return nil
 }
+
 func validateNodesFlag(nodes int) error {
 	if nodes < 1 || nodes > 15 {
 		return fmt.Errorf("invalid number of nodes: %d: must be greater than 0 and no greater than 15", nodes)
 	}
 	return nil
 }
-func validateNameFlag(name string) error {
-	if !validName.MatchString(name) {
-		return fmt.Errorf("invalid name: %q: must start with a lowercase letter, end with a lowercase letter or digit, contain only lowercase letters, digits, or hyphens, and be at most 63 characters", name)
-	}
-	return nil
-}
+
+// ======================================================================
+// Output and prompts
+//
+// User-facing headers and the destroy confirmation prompt.
+// ======================================================================
 
 func createHeader(provider string, nodes int, name string) string {
 	return fmt.Sprintf("→ Creating homelab %q...\n  Name:      %s\n  Provider:  %s\n  Nodes:     %d\n", name, name, provider, nodes)
-}
-
-func envDir(name string) (string, error) {
-	homelabPath, err := buildHomelabRootDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(homelabPath, name), nil
-}
-
-func saveKubeconfig(dir string, data []byte) (string, error) {
-	err := os.MkdirAll(dir, 0700)
-	if err != nil {
-		return "", fmt.Errorf("creating environment directory: %w", err)
-	}
-	pathToFile := filepath.Join(dir, "kubeconfig")
-	err = os.WriteFile(pathToFile, data, 0600)
-	if err != nil {
-		return "", fmt.Errorf("writing kubeconfig: %w", err)
-	}
-	return pathToFile, nil
-}
-
-func saveState(dir string, s HomelabState) error {
-	err := os.MkdirAll(dir, 0700)
-	if err != nil {
-		return fmt.Errorf("creating environment directory: %w", err)
-	}
-	stateJSON, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding homelab state: %w", err)
-	}
-	pathToFile := filepath.Join(dir, "state.json")
-	err = os.WriteFile(pathToFile, stateJSON, 0600)
-	if err != nil {
-		return fmt.Errorf("writing homelab state: %w", err)
-	}
-	return nil
-}
-
-func loadState(dir string) (HomelabState, error) {
-	var homelabState HomelabState
-	pathToFile := filepath.Join(dir, "state.json")
-	contents, err := os.ReadFile(pathToFile)
-	if err != nil {
-		return HomelabState{}, fmt.Errorf("reading homelab state: %w", err)
-	}
-	if err = json.Unmarshal(contents, &homelabState); err != nil {
-		return HomelabState{}, fmt.Errorf("parsing homelab state: %w", err)
-	}
-	return homelabState, nil
-
 }
 
 func confirmDestroy(r io.Reader, w io.Writer, name string) (bool, error) {
@@ -308,6 +296,30 @@ func confirmDestroy(r io.Reader, w io.Writer, name string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// ======================================================================
+// Paths and state files
+//
+// Locates ~/.homelab and reads/writes each homelab's state.json and kubeconfig.
+// ======================================================================
+
+func buildHomelabRootDir() (string, error) {
+	userHomepath, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding home directory: %w", err)
+	}
+	homelabPath := filepath.Join(userHomepath, ".homelab")
+	return homelabPath, nil
+
+}
+
+func envDir(name string) (string, error) {
+	homelabPath, err := buildHomelabRootDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(homelabPath, name), nil
 }
 
 func listStates() ([]HomelabState, error) {
@@ -342,20 +354,46 @@ func listStates() ([]HomelabState, error) {
 	return currentStateList, nil
 }
 
-func buildHomelabRootDir() (string, error) {
-	userHomepath, err := os.UserHomeDir()
+func loadState(dir string) (HomelabState, error) {
+	var homelabState HomelabState
+	pathToFile := filepath.Join(dir, "state.json")
+	contents, err := os.ReadFile(pathToFile)
 	if err != nil {
-		return "", fmt.Errorf("finding home directory: %w", err)
+		return HomelabState{}, fmt.Errorf("reading homelab state: %w", err)
 	}
-	homelabPath := filepath.Join(userHomepath, ".homelab")
-	return homelabPath, nil
+	if err = json.Unmarshal(contents, &homelabState); err != nil {
+		return HomelabState{}, fmt.Errorf("parsing homelab state: %w", err)
+	}
+	return homelabState, nil
 
 }
 
-func main() {
-	rootCmd := newRootCommand()
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "✗ Error: %v\n", err)
-		os.Exit(1)
+func saveState(dir string, s HomelabState) error {
+	err := os.MkdirAll(dir, 0700)
+	if err != nil {
+		return fmt.Errorf("creating environment directory: %w", err)
 	}
+	stateJSON, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding homelab state: %w", err)
+	}
+	pathToFile := filepath.Join(dir, "state.json")
+	err = os.WriteFile(pathToFile, stateJSON, 0600)
+	if err != nil {
+		return fmt.Errorf("writing homelab state: %w", err)
+	}
+	return nil
+}
+
+func saveKubeconfig(dir string, data []byte) (string, error) {
+	err := os.MkdirAll(dir, 0700)
+	if err != nil {
+		return "", fmt.Errorf("creating environment directory: %w", err)
+	}
+	pathToFile := filepath.Join(dir, "kubeconfig")
+	err = os.WriteFile(pathToFile, data, 0600)
+	if err != nil {
+		return "", fmt.Errorf("writing kubeconfig: %w", err)
+	}
+	return pathToFile, nil
 }
