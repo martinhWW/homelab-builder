@@ -9,10 +9,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+      - name: Lint YAML
+        run: yamllint --strict .
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15
       - name: Check formatting
         run: |
           unformatted=$(gofmt -l .)

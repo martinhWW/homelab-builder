@@ -682,3 +682,136 @@ func TestDestroyForceSkipsPrompt(t *testing.T) {
 		t.Errorf("deleteVM called with %q, want %q", *gotDelete, "mylab")
 	}
 }
+
+func TestListStatesNoHomelabDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	states, err := listStates()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(states) != 0 {
+		t.Errorf("got %d states, want 0", len(states))
+	}
+}
+
+func TestListStates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".homelab")
+
+	for _, name := range []string{"alpha", "beta"} {
+		if err := saveState(filepath.Join(root, name), HomelabState{Name: name, Provider: "local"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A dir without state.json and a stray file should both be skipped.
+	if err := os.MkdirAll(filepath.Join(root, "orphan"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".DS_Store"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := listStates()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var names []string
+	for _, s := range states {
+		names = append(names, s.Name)
+	}
+	if want := []string{"alpha", "beta"}; !slices.Equal(names, want) {
+		t.Errorf("got %v, want %v", names, want)
+	}
+}
+
+func TestListStatesCorrupt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".homelab", "broken")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listStates(); err == nil {
+		t.Fatal("expected error for corrupt state file, got nil")
+	}
+}
+
+func runList(t *testing.T) (string, error) {
+	t.Helper()
+	rootCmd := newRootCommand()
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"list"})
+	err := rootCmd.Execute()
+	return buf.String(), err
+}
+
+func TestListShowsManagedHomelabs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{"running", "stopped", "gone"} {
+		s := HomelabState{Name: name, Provider: "local", Nodes: 1}
+		if err := saveState(filepath.Join(home, ".homelab", name), s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubListInstances(t, `{"list": [
+		{"name": "running", "state": "Running", "ipv4": ["192.168.64.5"]},
+		{"name": "stopped", "state": "Stopped", "ipv4": []},
+		{"name": "unrelated", "state": "Running", "ipv4": ["192.168.64.9"]}
+	]}`, nil)
+
+	out, err := runList(t)
+	if err != nil {
+		t.Fatalf("list error = %v", err)
+	}
+	want := "NAME     PROVIDER  STATE      NODES\n" +
+		"gone     local     Not found  1\n" +
+		"running  local     Running    1\n" +
+		"stopped  local     Stopped    1\n"
+	if out != want {
+		t.Errorf("list output:\n%s\nwant:\n%s", out, want)
+	}
+	if strings.Contains(out, "unrelated") {
+		t.Errorf("unmanaged VM listed: %q", out)
+	}
+}
+
+func TestListEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	called := false
+	orig := listInstances
+	listInstances = func() ([]byte, error) {
+		called = true
+		return []byte(`{"list": []}`), nil
+	}
+	t.Cleanup(func() { listInstances = orig })
+
+	out, err := runList(t)
+	if err != nil {
+		t.Fatalf("list error = %v", err)
+	}
+	if out != "• No homelabs found\n" {
+		t.Errorf("got %q, want %q", out, "• No homelabs found\n")
+	}
+	if called {
+		t.Error("listInstances called with no homelabs; list should not need multipass")
+	}
+}
+
+func TestListMultipassFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := saveState(filepath.Join(home, ".homelab", "mylab"), HomelabState{Name: "mylab", Provider: "local", Nodes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	stubListInstances(t, "", errors.New("multipass not found"))
+
+	if _, err := runList(t); err == nil {
+		t.Fatal("expected error when multipass list fails, got nil")
+	}
+}
