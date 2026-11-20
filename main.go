@@ -62,8 +62,8 @@ func newRootCommand() *cobra.Command {
 		Use:   "homelab",
 		Short: "A CLI for creating and deploying a homelab environment",
 		Long:  "A CLI for creating and deploying a homelab environment to a local Multipass instance, AWS, or GCP",
-		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
